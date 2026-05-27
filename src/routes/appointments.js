@@ -95,6 +95,101 @@ router.post('/:id/cancel-by-clinic', async (req, res) => {
   });
 });
 
+// ── PATCH /api/appointments/:id/status ───────────────────────────────────────
+//
+// Body: { status: 'completed' | 'no_show' }
+// Marks attendance for a past confirmed appointment.
+// If no_show: increments patients.no_show_count and sends a WhatsApp follow-up.
+// ─────────────────────────────────────────────────────────────────────────────
+
+router.patch('/:id/status', async (req, res) => {
+  const { id }     = req.params;
+  const { status } = req.body;
+
+  if (!['completed', 'no_show'].includes(status)) {
+    return res.status(400).json({ error: 'الحالة يجب أن تكون completed أو no_show' });
+  }
+
+  // 1. Load appointment + patient + clinic
+  const { data: appt, error: apptErr } = await supabase
+    .from('appointments')
+    .select(`
+      id, scheduled_at, queue_number, status, reason, patient_name,
+      patients ( id, name, phone_number, no_show_count ),
+      clinics  ( id, name, whatsapp_phone_number_id )
+    `)
+    .eq('id', id)
+    .single();
+
+  if (apptErr || !appt) {
+    return res.status(404).json({ error: 'الموعد غير موجود' });
+  }
+
+  if (!['scheduled', 'confirmed'].includes(appt.status)) {
+    return res.status(400).json({ error: 'يمكن تسجيل الحضور فقط للمواعيد المحجوزة أو المؤكدة' });
+  }
+
+  // 2. Update appointment status
+  const { error: updateErr } = await supabase
+    .from('appointments')
+    .update({ status })
+    .eq('id', id);
+
+  if (updateErr) {
+    logger.error('status update failed', { id, status, error: updateErr.message });
+    return res.status(500).json({ error: 'فشل تحديث حالة الموعد' });
+  }
+
+  logger.info('Appointment status updated', { id, status });
+
+  // 3. If no_show: increment counter + send WhatsApp follow-up
+  let whatsappSent  = false;
+  let whatsappError = null;
+
+  if (status === 'no_show') {
+    const patient = appt.patients;
+
+    // Increment no_show_count
+    const { error: countErr } = await supabase
+      .from('patients')
+      .update({ no_show_count: (patient.no_show_count || 0) + 1 })
+      .eq('id', patient.id);
+
+    if (countErr) {
+      logger.error('no_show_count increment failed', { patientId: patient.id, error: countErr.message });
+    }
+
+    // Send WhatsApp follow-up (best-effort)
+    try {
+      const clinic      = appt.clinics;
+      const patientName = appt.patient_name || patient.name || 'مريضنا العزيز';
+
+      const message =
+        `مرحبا ${patientName} 👋\n` +
+        `لاحظنا انك ما كدرت تحضر لموعدك اليوم.\n` +
+        `إذا تريد تحجز موعد جديد، راسلنا وبكل سرور نساعدك 🙏`;
+
+      await sendWhatsAppMessage(
+        clinic.whatsapp_phone_number_id,
+        patient.phone_number,
+        message
+      );
+
+      whatsappSent = true;
+      logger.info('No-show follow-up WhatsApp sent', { to: patient.phone_number });
+    } catch (err) {
+      whatsappError = err.message;
+      logger.error('No-show WhatsApp failed', { id, error: err.message });
+    }
+  }
+
+  return res.json({
+    success: true,
+    whatsappSent,
+    whatsappError: whatsappError || undefined,
+  });
+});
+
 // ── Helper: format cancellation message ──────────────────────────────────────
 
 function buildCancellationMessage(patientName, slotDate, reason, queueNumber) {

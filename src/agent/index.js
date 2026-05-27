@@ -1,4 +1,4 @@
-const Anthropic = require('@anthropic-ai/sdk');
+const OpenAI = require('openai');
 const dayjs = require('dayjs');
 const utc = require('dayjs/plugin/utc');
 const timezone = require('dayjs/plugin/timezone');
@@ -9,9 +9,9 @@ const { toolDefinitions, executeTool } = require('./tools');
 const { saveMessage, loadConversationHistory, supabase } = require('../services/supabase');
 const logger = require('../utils/logger');
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const MODEL           = 'claude-sonnet-4-6';
+const MODEL           = 'gpt-4o-mini';
 const MAX_TOKENS      = 1024;
 const MAX_TOOL_ROUNDS = 5;
 const TIMEZONE        = 'Asia/Baghdad';
@@ -35,19 +35,22 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
   let currentMessages = messages;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const response = await anthropic.messages.create({
+    const response = await client.chat.completions.create({
       model:      MODEL,
       max_tokens: MAX_TOKENS,
-      system,
-      tools:      toolDefinitions,
-      messages:   currentMessages,
+      messages:   [{ role: 'system', content: system }, ...currentMessages],
+      tools:      toolDefinitions.map((t) => ({
+        type:     'function',
+        function: { name: t.name, description: t.description, parameters: t.input_schema },
+      })),
     });
 
-    logger.debug('Claude response', { stopReason: response.stop_reason, round });
+    const choice = response.choices[0];
+    logger.debug('OpenAI response', { finishReason: choice.finish_reason, round });
 
     // ── Final answer ──────────────────────────────────────────────────────────
-    if (response.stop_reason === 'end_turn') {
-      const text = extractText(response.content) || 'عذراً، ما قدرت أفهم. حاول مرة ثانية.';
+    if (choice.finish_reason === 'stop') {
+      const text = choice.message.content?.trim() || 'عذراً، ما قدرت أفهم. حاول مرة ثانية.';
 
       await saveMessage({
         clinicId:     clinic.id,
@@ -61,37 +64,34 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
     }
 
     // ── Tool calls ────────────────────────────────────────────────────────────
-    if (response.stop_reason === 'tool_use') {
-      const toolUseBlocks = response.content.filter((b) => b.type === 'tool_use');
-      const textBlock     = extractText(response.content);
+    if (choice.finish_reason === 'tool_calls') {
+      const toolCalls = choice.message.tool_calls;
 
       await saveMessage({
         clinicId:     clinic.id,
         patientId:    patient.id,
         patientPhone,
         role:         'assistant',
-        content:      textBlock || null,
-        toolCalls:    toolUseBlocks,
+        content:      choice.message.content || null,
+        toolCalls,
       });
 
-      currentMessages = [
-        ...currentMessages,
-        { role: 'assistant', content: response.content },
-      ];
+      currentMessages = [...currentMessages, choice.message];
 
-      const toolResults = [];
+      for (const toolCall of toolCalls) {
+        const name  = toolCall.function.name;
+        const input = JSON.parse(toolCall.function.arguments);
 
-      for (const block of toolUseBlocks) {
-        logger.info('Tool call', { name: block.name, input: block.input });
+        logger.info('Tool call', { name, input });
 
-        const result = await executeTool(block.name, block.input, {
+        const result = await executeTool(name, input, {
           clinic,
           patient,
           patientPhone,
         });
 
         logger.info('Tool result', {
-          name:   block.name,
+          name,
           result: JSON.stringify(result).slice(0, 200),
         });
 
@@ -101,25 +101,19 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
           patientPhone,
           role:         'tool',
           content:      JSON.stringify(result),
-          toolCalls:    [{ tool_use_id: block.id, name: block.name }],
+          toolCalls:    [{ tool_call_id: toolCall.id, name }],
         });
 
-        toolResults.push({
-          type:        'tool_result',
-          tool_use_id: block.id,
-          content:     JSON.stringify(result),
-        });
+        currentMessages = [
+          ...currentMessages,
+          { role: 'tool', tool_call_id: toolCall.id, content: JSON.stringify(result) },
+        ];
       }
-
-      currentMessages = [
-        ...currentMessages,
-        { role: 'user', content: toolResults },
-      ];
 
       continue;
     }
 
-    logger.warn('Unexpected stop_reason', { stopReason: response.stop_reason });
+    logger.warn('Unexpected finish_reason', { finishReason: choice.finish_reason });
     break;
   }
 
@@ -188,13 +182,25 @@ async function loadUpcomingBlocks(clinicId) {
 // ── Message builder ───────────────────────────────────────────────────────────
 
 function buildMessages(history, currentUserMessage) {
-  const textRows = history.filter(
-    (m) => (m.role === 'user' || m.role === 'assistant') && m.content?.trim()
-  );
+  // Include user, assistant, AND doctor messages.
+  // Doctor messages are mapped to 'assistant' role with a [الطبيب] prefix so the
+  // AI knows a human doctor already responded and won't repeat the same information.
+  const textRows = history
+    .filter((m) => ['user', 'assistant', 'doctor'].includes(m.role) && m.content?.trim())
+    .map((m) => ({
+      role:    m.role === 'doctor' ? 'assistant' : m.role,
+      srcRole: m.role,   // keep original role for deduplication logic
+      content: m.role === 'doctor'
+        ? `[رسالة الطبيب للمريض]: ${m.content}`
+        : m.content,
+    }));
 
+  // Deduplicate consecutive messages from the same *original* source only.
+  // This prevents doctor messages from being collapsed with AI assistant messages.
   const deduped = [];
   for (const row of textRows) {
-    if (deduped.length > 0 && deduped[deduped.length - 1].role === row.role) {
+    const last = deduped[deduped.length - 1];
+    if (last && last.srcRole === row.srcRole) {
       deduped[deduped.length - 1] = row;
     } else {
       deduped.push(row);
@@ -205,7 +211,7 @@ function buildMessages(history, currentUserMessage) {
 
   const last = deduped[deduped.length - 1];
   if (!last || last.content?.trim() !== currentUserMessage.trim()) {
-    deduped.push({ role: 'user', content: currentUserMessage });
+    deduped.push({ role: 'user', srcRole: 'user', content: currentUserMessage });
   }
 
   return deduped.map((m) => ({ role: m.role, content: m.content }));

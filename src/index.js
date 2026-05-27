@@ -8,7 +8,7 @@ const logger  = require('./utils/logger');
 const REQUIRED_ENV = [
   'SUPABASE_URL',
   'SUPABASE_SERVICE_ROLE_KEY',
-  'ANTHROPIC_API_KEY',
+  'OPENAI_API_KEY',
   'META_VERIFY_TOKEN',
   'META_ACCESS_TOKEN',
   'META_PHONE_NUMBER_ID',
@@ -21,6 +21,7 @@ if (missing.length > 0) {
 
 const whatsappRouter     = require('./webhooks/whatsapp');
 const appointmentsRouter = require('./routes/appointments');
+const messagesRouter     = require('./routes/messages');
 
 const app = express();
 
@@ -51,6 +52,7 @@ app.use(
 // Routes
 app.use('/webhook',          whatsappRouter);
 app.use('/api/appointments', appointmentsRouter);
+app.use('/api/messages',     messagesRouter);
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
