@@ -27,7 +27,7 @@ async function transcribeAudio(audioBuffer) {
   // response_format: 'text' makes the SDK return a plain string directly
   const transcript = await openai.audio.transcriptions.create({
     file,
-    model:           'whisper-1',
+    model:           'gpt-4o-transcribe',
     language:        'ar',        // force Arabic for better accuracy
     response_format: 'text',
   });

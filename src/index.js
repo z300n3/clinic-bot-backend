@@ -19,9 +19,11 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
+const cookieParser       = require('cookie-parser');
 const whatsappRouter     = require('./webhooks/whatsapp');
 const appointmentsRouter = require('./routes/appointments');
 const messagesRouter     = require('./routes/messages');
+const adminRouter        = require('./routes/admin');
 
 const app = express();
 
@@ -42,6 +44,9 @@ app.use((req, res, next) => {
 // Parse JSON bodies (Meta sends application/json)
 app.use(express.json());
 
+// Cookie parser (required for admin session)
+app.use(cookieParser());
+
 // HTTP request logging
 app.use(
   morgan('combined', {
@@ -53,6 +58,7 @@ app.use(
 app.use('/webhook',          whatsappRouter);
 app.use('/api/appointments', appointmentsRouter);
 app.use('/api/messages',     messagesRouter);
+app.use('/admin',            adminRouter);
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
