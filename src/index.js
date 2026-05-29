@@ -27,7 +27,7 @@ const adminRouter        = require('./routes/admin');
 
 const app = express();
 
-// ── CORS — allow the Next.js dashboard to call /api/* ────────────────────────
+// ── CORS — allow the Next.js dashboard to call /api/────────────────────────
 const DASHBOARD_ORIGIN = process.env.DASHBOARD_URL || 'http://localhost:3001';
 app.use((req, res, next) => {
   const origin = req.headers.origin;
