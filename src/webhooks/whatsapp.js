@@ -1,11 +1,13 @@
 const express = require('express');
 const router = express.Router();
 
-const { handleMessage } = require('../agent');
+const { handleIncomingMessage } = require('../agent');
 const {
   getClinicByPhoneNumberId,
   findOrCreatePatient,
   saveMessage,
+  getConversationState,
+  upsertConversationState,
 } = require('../services/supabase');
 const { sendWhatsAppMessage, markMessageRead, sendTypingIndicator, downloadWhatsAppMedia } = require('../services/whatsapp');
 const { transcribeAudio } = require('../services/transcription');
@@ -175,28 +177,63 @@ async function processMessage({ phoneNumberId, from, messageId, text, messageTyp
 
 // ── Phase 2: debounced (runs once per burst, with the combined text) ───────────
 
+// Keywords that mean the patient wants the bot to resume (booking/dismissal intent)
+const RESUME_KEYWORDS = [
+  'احجز', 'موعد', 'حجز', 'اريد', 'أريد', 'ابي', 'أبي',
+  'كلمني', 'ليس ميحتاج', 'ما ميحتاج', 'لا يهم', 'نسيت',
+];
+
+// Iraqi-Arabic positive/agreement phrases — must NEVER trigger awaiting_human
+// (kept here as a reference; the enforcement is in the system prompt)
+// "مو مشكلة", "لا مشكلة", "ماكو مشكلة", "تمام", "زين", "موافق" …
+
 async function processDebounced({ clinic, patient, phoneNumberId, from, combinedText }) {
-  // Show typing indicator so the patient knows the bot is working
+  // 1. Check conversation state
+  const state = await getConversationState(clinic.id, from);
+
+  if (state?.state === 'awaiting_human') {
+    // If patient sends a booking or dismissal keyword → auto-resume the bot
+    const wantsResume = RESUME_KEYWORDS.some((kw) => combinedText.includes(kw));
+
+    if (wantsResume) {
+      logger.info('Auto-resuming bot from awaiting_human', { from, trigger: combinedText.slice(0, 60) });
+      await upsertConversationState(clinic.id, from, 'active', {});
+      // Fall through — process normally with Claude
+    } else {
+      // Rate-limit the "received" reply: send it at most once every 5 minutes
+      const FIVE_MIN_MS    = 5 * 60 * 1000;
+      const lastReplyTime  = state.last_message_at ? new Date(state.last_message_at).getTime() : 0;
+      const shouldNotify   = (Date.now() - lastReplyTime) >= FIVE_MIN_MS;
+
+      if (shouldNotify) {
+        await upsertConversationState(clinic.id, from, 'awaiting_human', state.state_data);
+        await sendWhatsAppMessage(phoneNumberId, from, 'تم استلام رسالتك، فريق العيادة سيرد قريباً ⏳');
+      }
+      return;
+    }
+  }
+
+  // 2. Update state to active + touch last_message_at
+  await upsertConversationState(clinic.id, from, 'active', state?.state_data || {});
+
+  // 3. Show typing indicator so the patient knows the bot is working
   sendTypingIndicator(phoneNumberId, from).catch(() => {});
 
-  // Run state-machine agent — it manages all state transitions internally
+  // 4. Run AI agent with the combined (debounced) text
   let reply;
   try {
-    reply = await handleMessage({
-      clinicId:     clinic.id,
-      patientPhone: from,
-      patientId:    patient.id,
-      messageText:  combinedText,
+    reply = await handleIncomingMessage({
       clinic,
+      patient,
+      patientPhone: from,
+      userMessage:  combinedText,
     });
   } catch (err) {
     logger.error('Agent error', { from, error: err.message });
     reply = 'عذراً، صار خطأ تقني. حاول مرة ثانية بعد شوي. 🙏';
   }
 
-  // null means the agent chose not to reply (e.g. rate-limited awaiting_human)
-  if (!reply) return;
-
+  // 5. Send reply
   try {
     await sendWhatsAppMessage(phoneNumberId, from, reply);
   } catch (sendErr) {
