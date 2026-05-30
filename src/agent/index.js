@@ -116,6 +116,7 @@ async function handleMessage({ clinicId, patientPhone, patientId, messageText, c
 
   try {
     switch (currentState) {
+      case 'active': // legacy DB value — treat identically to idle
       case 'idle':
         reply = await handleIdle(ctx);
         break;
