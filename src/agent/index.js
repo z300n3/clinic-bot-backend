@@ -271,6 +271,12 @@ booking | cancellation | inquiry | greeting | urgent
 // ── handleCollectingInfo ──────────────────────────────────────────────────────
 
 async function handleCollectingInfo({ clinicId, patientPhone, patientId, messageText, clinic, stateData }) {
+  // Let the AI decide if the patient wants to abort — catches any phrasing
+  if (await wantsToAbort(messageText)) {
+    await upsertConversationState(clinicId, patientPhone, 'idle', {});
+    return 'تمام، إذا احتجت تحجز بأي وقت كلمنا 😊';
+  }
+
   const data = { ...stateData };
 
   // Fill the first missing field with whatever the patient sent
@@ -307,6 +313,11 @@ async function handleCollectingInfo({ clinicId, patientPhone, patientId, message
 // ── handleCheckingSlots ───────────────────────────────────────────────────────
 
 async function handleCheckingSlots({ clinicId, patientPhone, patientId, messageText, clinic, stateData }) {
+  // Let the AI decide if the patient wants to abort — catches any phrasing
+  if (await wantsToAbort(messageText)) {
+    await upsertConversationState(clinicId, patientPhone, 'idle', {});
+    return 'تمام، إذا احتجت تحجز بأي وقت كلمنا 😊';
+  }
   const slots = stateData.candidate_slots || [];
 
   // Patient asking for different time options?
@@ -641,6 +652,27 @@ async function answerInquiry(message, clinic) {
   });
 
   return res.choices[0].message.content.trim();
+}
+
+/**
+ * Returns true if the patient wants to stop/abort the current booking flow.
+ * Uses a minimal AI call (~15 tokens) instead of fragile keyword lists,
+ * so any natural phrasing ("راح افكر", "بعدين", "مو وقتي", "خلص"…) is handled.
+ */
+async function wantsToAbort(message) {
+  try {
+    const res = await openai.chat.completions.create({
+      model:      'gpt-4o-mini',
+      max_tokens: 5,
+      messages:   [{
+        role:    'user',
+        content: `رسالة مريض أثناء حجز موعد: "${message}"\nهل يريد إيقاف الحجز والخروج؟\nأجب بكلمة واحدة: yes أو no`,
+      }],
+    });
+    return res.choices[0].message.content.trim().toLowerCase().startsWith('yes');
+  } catch {
+    return false; // on error, assume they're continuing
+  }
 }
 
 function formatSlotsMessage(slots) {
