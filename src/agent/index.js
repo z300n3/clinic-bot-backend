@@ -433,11 +433,22 @@ async function handleAwaitingCancelConfirm({ clinicId, patientPhone, patientId, 
 // ── handleAwaitingDuplicateDecision ───────────────────────────────────────────
 
 async function handleAwaitingDuplicateDecision({ clinicId, patientPhone, patientId, messageText, clinic, stateData }) {
-  const isPositive = POSITIVE_WORDS.some((w) => messageText.includes(w));
-  const isNegative = NEGATIVE_WORDS.some((w) => messageText.includes(w));
+  // Normalize message: trim, collapse spaces, lowercase
+  const msg = messageText.trim().replace(/\s+/g, ' ').toLowerCase();
+
+  const positiveWords = [
+    'نعم','اي','ايه','آيه','اه','أه','صح','اكيد','أكيد',
+    'تمام','زين','اوكي','أوكي','ماشي','موافق','يلا','عدل','طيب','يعني نعم',
+  ];
+  const negativeWords = [
+    'لا','لأ','لآ','لاء','مو','ما','ابقيه','خليه','بلا','ما ابي','لا اريد',
+  ];
+
+  const isPositive = positiveWords.some((w) => msg.includes(w));
+  const isNegative = negativeWords.some((w) => msg.includes(w));
 
   if (isPositive) {
-    // Cancel existing appointment and start fresh booking flow
+    // 1. Cancel the existing appointment
     const { error } = await supabase
       .from('appointments')
       .update({ status: 'cancelled', cancelled_at: new Date().toISOString() })
@@ -445,13 +456,16 @@ async function handleAwaitingDuplicateDecision({ clinicId, patientPhone, patient
 
     if (error) logger.error('handleAwaitingDuplicateDecision cancel failed', { error: error.message });
 
+    // 2. Transition to collecting_info to start a fresh booking
     await upsertConversationState(clinicId, patientPhone, 'collecting_info', {
       intent:          'booking',
       patient_name:    null,
       reason:          null,
       time_preference: null,
     });
-    return `تم إلغاء موعدك السابق ✅\nالحين نحجز موعد جديد.\nاسمك الكامل؟`;
+
+    // 3. Return confirmation + first question
+    return `تم إلغاء موعدك ✅\nالحين نحجز موعد جديد.\n\nاسمك الكامل؟`;
   }
 
   if (isNegative) {
@@ -459,6 +473,7 @@ async function handleAwaitingDuplicateDecision({ clinicId, patientPhone, patient
     return `تمام، موعدك محجوز يوم ${stateData.existing_appointment_time} 👍`;
   }
 
+  // Unclear — repeat the question
   return `عندك موعد يوم ${stateData.existing_appointment_time}\nتريد تلغيه وتحجز غيره؟ (نعم / لا)`;
 }
 
