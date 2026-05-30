@@ -31,7 +31,6 @@ const app = express();
 // ── CORS — allow the Next.js dashboard to call /api/────────────────────────
 const DASHBOARD_ORIGIN = process.env.DASHBOARD_URL || 'http://localhost:3001';
 // ── CORS — allow the Next.js dashboard to call /api/────────────────────────
-const DASHBOARD_ORIGIN = process.env.DASHBOARD_URL || 'http://localhost:3001';
 app.use(cors({
   origin: [
     'https://clinic-bot-fr89.vercel.app',
