@@ -381,7 +381,7 @@ async function isAskingAboutConsultationPrice(message) {
       max_tokens: 5,
       messages:   [{
         role:    'user',
-        content: `رسالة: "${message}"\nهل المريض يسأل عن سعر أو تكلفة زيارة الطبيب (الكشفية)؟\nأجب بكلمة واحدة: yes أو no`,
+        content: `رسالة: "${message}"\nهل المريض يسأل عن سعر أو تكلفة زيارة الطبيب (الباص باص الطبيب)(الكشفية)؟\nأجب بكلمة واحدة: yes أو no`,
       }],
     });
     return res.choices[0].message.content.trim().toLowerCase().startsWith('yes');
