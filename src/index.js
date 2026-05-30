@@ -3,7 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const morgan  = require('morgan');
 const logger  = require('./utils/logger');
-
+const cors = require('cors')
 // Validate required env vars at startup
 const REQUIRED_ENV = [
   'SUPABASE_URL',
@@ -24,11 +24,22 @@ const whatsappRouter     = require('./webhooks/whatsapp');
 const appointmentsRouter = require('./routes/appointments');
 const messagesRouter     = require('./routes/messages');
 const adminRouter        = require('./routes/admin');
+const { sendReminders }  = require('./jobs/reminders');
 
 const app = express();
 
 // ── CORS — allow the Next.js dashboard to call /api/────────────────────────
 const DASHBOARD_ORIGIN = process.env.DASHBOARD_URL || 'http://localhost:3001';
+// ── CORS — allow the Next.js dashboard to call /api/────────────────────────
+const DASHBOARD_ORIGIN = process.env.DASHBOARD_URL || 'http://localhost:3001';
+app.use(cors({
+  origin: [
+    'https://clinic-bot-fr89.vercel.app',
+    'http://localhost:3000'
+  ],
+  methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}))
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin === DASHBOARD_ORIGIN) {
@@ -78,4 +89,12 @@ app.use((err, _req, res, _next) => {
 const PORT = parseInt(process.env.PORT || '3000', 10);
 app.listen(PORT, () => {
   logger.info(`Clinic Bot backend running on port ${PORT}`);
+
+  // ── Appointment reminders — run once on startup, then every hour ──────────
+  sendReminders().catch((err) => logger.error('Reminders startup error', { error: err.message }));
+  setInterval(
+    () => sendReminders().catch((err) => logger.error('Reminders interval error', { error: err.message })),
+    60 * 60 * 1000  // every hour
+  );
 });
+

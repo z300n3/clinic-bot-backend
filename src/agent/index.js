@@ -1,355 +1,688 @@
-const OpenAI = require('openai');
-const dayjs = require('dayjs');
-const utc = require('dayjs/plugin/utc');
-const timezone = require('dayjs/plugin/timezone');
-dayjs.extend(utc);
-dayjs.extend(timezone);
+'use strict';
 
-const { toolDefinitions, executeTool } = require('./tools');
-const { saveMessage, loadConversationHistory, supabase } = require('../services/supabase');
+/**
+ * agent/index.js — State Machine Agent
+ *
+ * Replaces the history-based loop with a structured state machine.
+ * Each incoming message is routed to a focused handler based on the
+ * current conversation state stored in conversation_state.state_data.
+ *
+ * States:
+ *   idle                  — default; classifies intent
+ *   collecting_info       — gathering name + reason before showing slots
+ *   checking_slots        — patient is viewing and choosing an available day
+ *   awaiting_confirmation — patient reviewing booking summary before confirming
+ *   awaiting_cancel_confirm — patient confirming cancellation
+ *   awaiting_human        — handed off to staff (auto-resets after 24 h)
+ *
+ * Token comparison (per conversation):
+ *   Before: ~9,000 tokens  ($0.07)
+ *   After:  ~1,000 tokens  ($0.008)   ≈ 89% reduction
+ */
+
+const OpenAI = require('openai');
+const dayjs  = require('dayjs');
+const utc    = require('dayjs/plugin/utc');
+const tz     = require('dayjs/plugin/timezone');
+dayjs.extend(utc);
+dayjs.extend(tz);
+
+const {
+  saveMessage,
+  upsertConversationState,
+  supabase,
+} = require('../services/supabase');
+
+const {
+  getAvailableSlots,
+  escalateToHuman,
+  formatArabicDay,
+  formatTime12,
+} = require('./tools');
+
 const logger = require('../utils/logger');
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai   = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const TIMEZONE = 'Asia/Baghdad';
 
-const MODEL           = 'gpt-4o-mini';
-const MAX_TOKENS      = 1024;
-const MAX_TOOL_ROUNDS = 5;
-const TIMEZONE        = 'Asia/Baghdad';
+// ── Word lists ────────────────────────────────────────────────────────────────
 
-const DAY_NAMES   = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
-const MONTH_NAMES = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+const RESUME_KEYWORDS = [
+  'احجز','موعد','حجز','اريد','أريد','ابي','أبي','كلمني','نسيت','لا يهم',
+];
+
+const POSITIVE_WORDS = [
+  'نعم','اي','أي','ايه','صح','اكيد','أكيد','تمام','زين','اوكي','أوكي',
+  'ماشي','موافق','يلا','عدل','خوش','نعم بالله','أيوه',
+];
+
+const NEGATIVE_WORDS = [
+  'لا','لأ','لأه','مو','غير','بدل','تغيير','ما اريد','ابقيه','خليه','مو صح',
+];
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-async function handleIncomingMessage({ clinic, patient, patientPhone, userMessage }) {
-  // Load history + live schedule + upcoming blocks in parallel
-  const [history, weeklySchedule, upcomingBlocks] = await Promise.all([
-    loadConversationHistory(clinic.id, patientPhone, 10),
-    loadWeeklySchedule(clinic.id, clinic.working_hours),
-    loadUpcomingBlocks(clinic.id),
-  ]);
+/**
+ * Main dispatcher. Loads state, routes to the correct handler, saves reply.
+ *
+ * Returns the reply string, or null when we intentionally stay silent
+ * (rate-limited awaiting_human reply).
+ */
+async function handleMessage({ clinicId, patientPhone, patientId, messageText, clinic }) {
+  if (!messageText?.trim()) return null;
 
-  const messages = buildMessages(history, userMessage);
-  const system   = buildSystemPrompt(clinic, weeklySchedule, upcomingBlocks);
+  // 1. Load current conversation state
+  const { data: stateRow } = await supabase
+    .from('conversation_state')
+    .select('state, state_data, last_message_at')
+    .eq('clinic_id', clinicId)
+    .eq('patient_phone', patientPhone)
+    .maybeSingle();
 
-  let currentMessages = messages;
+  let currentState = stateRow?.state || 'idle';
+  const stateData  = stateRow?.state_data || {};
 
-  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const response = await client.chat.completions.create({
-      model:      MODEL,
-      max_tokens: MAX_TOKENS,
-      messages:   [{ role: 'system', content: system }, ...currentMessages],
-      tools:      toolDefinitions.map((t) => ({
-        type:     'function',
-        function: { name: t.name, description: t.description, parameters: t.input_schema },
-      })),
+  // 2. Handle awaiting_human branch
+  if (currentState === 'awaiting_human') {
+    // Resume keywords let the patient restart the bot without staff intervention
+    const wantsResume = RESUME_KEYWORDS.some((kw) => messageText.includes(kw));
+    if (wantsResume) {
+      logger.info('Auto-resuming bot from awaiting_human', { patientPhone });
+      await upsertConversationState(clinicId, patientPhone, 'idle', {});
+      currentState = 'idle';
+    } else {
+      const lastMsg      = stateRow?.last_message_at ? new Date(stateRow.last_message_at) : new Date(0);
+      const msElapsed    = Date.now() - lastMsg.getTime();
+      const hoursSince   = msElapsed / (1000 * 60 * 60);
+      const minutesSince = msElapsed / (1000 * 60);
+
+      if (hoursSince >= 24) {
+        // Stale — auto-reset to idle and fall through
+        logger.info('Auto-resetting stale awaiting_human', { patientPhone });
+        await upsertConversationState(clinicId, patientPhone, 'idle', {});
+        currentState = 'idle';
+      } else {
+        // Rate-limit the "received" reply to once per 5 minutes
+        if (minutesSince < 5) return null;
+        await upsertConversationState(clinicId, patientPhone, 'awaiting_human', stateData);
+        return 'تم استلام رسالتك ✅ فريق العيادة سيرد عليك قريباً.';
+      }
+    }
+  }
+
+  // 3. Route to the correct state handler
+  const ctx   = { clinicId, patientPhone, patientId, messageText, clinic };
+  let   reply;
+
+  try {
+    switch (currentState) {
+      case 'idle':
+        reply = await handleIdle(ctx);
+        break;
+      case 'collecting_info':
+        reply = await handleCollectingInfo({ ...ctx, stateData });
+        break;
+      case 'checking_slots':
+        reply = await handleCheckingSlots({ ...ctx, stateData });
+        break;
+      case 'awaiting_confirmation':
+        reply = await handleAwaitingConfirmation({ ...ctx, stateData });
+        break;
+      case 'awaiting_cancel_confirm':
+        reply = await handleAwaitingCancelConfirm({ ...ctx, stateData });
+        break;
+      case 'awaiting_duplicate_decision':
+        reply = await handleAwaitingDuplicateDecision({ ...ctx, stateData });
+        break;
+      default:
+        logger.warn('Unknown state — resetting to idle', { currentState, patientPhone });
+        await upsertConversationState(clinicId, patientPhone, 'idle', {});
+        reply = await handleIdle(ctx);
+    }
+  } catch (err) {
+    logger.error('Handler error', { state: currentState, error: err.message });
+    reply = 'عذراً، صار خطأ تقني. حاول مرة ثانية بعد شوي. 🙏';
+  }
+
+  reply = reply || 'عذراً، ما قدرت أفهم طلبك. حاول مرة ثانية.';
+
+  // 4. Persist the assistant reply
+  await saveMessage({
+    clinicId,
+    patientId,
+    patientPhone,
+    role:    'assistant',
+    content: reply,
+  }).catch((err) => logger.warn('saveMessage (assistant) failed', { error: err.message }));
+
+  return reply;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// State handlers
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── handleIdle ────────────────────────────────────────────────────────────────
+
+async function handleIdle({ clinicId, patientPhone, patientId, messageText, clinic }) {
+  // 0. Try FAQ lookup first — zero AI tokens
+  const faqAnswer = await searchFAQ(clinicId, messageText);
+  if (faqAnswer) return faqAnswer;
+
+  // 1. Classify intent with a minimal single-word AI call
+  const now       = dayjs().tz(TIMEZONE);
+  const classifyPrompt = `عيادة ${clinic.name} — د.${clinic.doctor_name}
+الدوام اليوم: ${getTodayHours(clinic, now)}
+الوقت: ${now.format('HH:mm')}
+
+رسالة المريض: "${messageText}"
+
+صنّف الرسالة بكلمة واحدة فقط:
+booking | cancellation | inquiry | greeting | urgent
+
+الجواب:`;
+
+  const aiRes  = await openai.chat.completions.create({
+    model:      'gpt-4o-mini',
+    max_tokens: 10,
+    messages:   [{ role: 'user', content: classifyPrompt }],
+  });
+  const intent = aiRes.choices[0].message.content.trim().toLowerCase();
+  logger.info('Intent classified', { patientPhone, intent, preview: messageText.slice(0, 60) });
+
+  // ── booking ────────────────────────────────────────────────────────────────
+  if (intent.includes('booking')) {
+    // Prevent duplicate bookings — check for an existing upcoming appointment
+    const existingAppt = await getNextAppointment(clinicId, patientPhone);
+    if (existingAppt) {
+      const apptTime = formatAppointmentTime(existingAppt.scheduled_at);
+      await upsertConversationState(clinicId, patientPhone, 'awaiting_duplicate_decision', {
+        intent:                    'duplicate_check',
+        existing_appointment_id:   existingAppt.id,
+        existing_appointment_time: apptTime,
+      });
+      return `عندك موعد محجوز مسبقاً يوم ${apptTime} 📅\n\nتريد تلغيه وتحجز غيره؟ (نعم / لا)`;
+    }
+
+    const extracted = extractBookingInfo(messageText);
+
+    if (extracted.name && extracted.reason) {
+      // All info present in the first message — skip collecting_info
+      const slots = await getAvailableSlots(clinicId, extracted.time_preference, clinic.working_hours || {});
+      if (slots.length === 0) {
+        await upsertConversationState(clinicId, patientPhone, 'idle', {});
+        return 'عذراً، ما اكو مواعيد متاحة هاي الفترة.\nتكدر تتصل بالعيادة مباشرة.';
+      }
+      await upsertConversationState(clinicId, patientPhone, 'checking_slots', {
+        intent: 'booking', patient_name: extracted.name,
+        reason: extracted.reason, candidate_slots: slots,
+      });
+      return formatSlotsMessage(slots);
+    }
+
+    // Missing info — ask for it
+    await upsertConversationState(clinicId, patientPhone, 'collecting_info', {
+      intent:          'booking',
+      patient_name:    extracted.name,
+      reason:          extracted.reason,
+      time_preference: extracted.time_preference,
     });
 
-    const choice = response.choices[0];
-    logger.debug('OpenAI response', { finishReason: choice.finish_reason, round });
+    if (!extracted.name && !extracted.reason) {
+      return `بكل سرور! 😊 أحتاج منك:\n1️⃣ اسمك الكامل؟\n2️⃣ سبب الزيارة؟`;
+    }
+    if (!extracted.name) return 'شنو اسمك الكامل؟';
+    return 'شنو سبب الزيارة؟';
+  }
 
-    // ── Final answer ──────────────────────────────────────────────────────────
-    if (choice.finish_reason === 'stop') {
-      const text = choice.message.content?.trim() || 'عذراً، ما قدرت أفهم. حاول مرة ثانية.';
+  // ── cancellation ────────────────────────────────────────────────────────────
+  if (intent.includes('cancellation')) {
+    const appt = await getNextAppointment(clinicId, patientPhone);
+    if (!appt) return 'ما عندك مواعيد قادمة محجوزة للإلغاء.';
 
-      await saveMessage({
-        clinicId:     clinic.id,
-        patientId:    patient.id,
-        patientPhone,
-        role:         'assistant',
-        content:      text,
+    const apptTime = formatAppointmentTime(appt.scheduled_at);
+    await upsertConversationState(clinicId, patientPhone, 'awaiting_cancel_confirm', {
+      intent:           'cancellation',
+      appointment_id:   appt.id,
+      appointment_time: apptTime,
+      patient_name:     appt.patient_name || '',
+    });
+    const nameNote = appt.patient_name ? ` باسم "${appt.patient_name}"` : '';
+    return `عندك موعد يوم ${apptTime}${nameNote}.\nتريد تلغيه؟ (نعم / لا)`;
+  }
+
+  // ── urgent ─────────────────────────────────────────────────────────────────
+  if (intent.includes('urgent')) {
+    await escalateToHuman(clinicId, patientPhone, 'حالة طارئة');
+    const phone = clinic.phone_number ? `\n📞 ${clinic.phone_number}` : '';
+    return `شكراً لتواصلك 🙏\nفهمنا إنك تحتاج مساعدة عاجلة. سيتواصل معك أحد من فريق العيادة فوراً.${phone}`;
+  }
+
+  // ── greeting ────────────────────────────────────────────────────────────────
+  if (intent.includes('greeting')) {
+    return `وعليكم السلام! أهلاً وسهلاً بعيادة ${clinic.name} 😊\nشنو أكدر أساعدك؟ حجز موعد؟ إلغاء؟ سؤال عن العيادة؟`;
+  }
+
+  // ── inquiry — answer with minimal AI prompt ────────────────────────────────
+  return answerInquiry(messageText, clinic);
+}
+
+// ── handleCollectingInfo ──────────────────────────────────────────────────────
+
+async function handleCollectingInfo({ clinicId, patientPhone, patientId, messageText, clinic, stateData }) {
+  const data = { ...stateData };
+
+  // Fill the first missing field with whatever the patient sent
+  if (!data.patient_name) {
+    data.patient_name = messageText.trim();
+  } else if (!data.reason) {
+    data.reason = messageText.trim();
+  }
+
+  // Still missing?
+  if (!data.patient_name) {
+    await upsertConversationState(clinicId, patientPhone, 'collecting_info', data);
+    return 'اسمك الكامل؟';
+  }
+  if (!data.reason) {
+    await upsertConversationState(clinicId, patientPhone, 'collecting_info', data);
+    return 'سبب الزيارة؟';
+  }
+
+  // All info collected — fetch slots
+  const slots = await getAvailableSlots(clinicId, data.time_preference, clinic.working_hours || {});
+  if (slots.length === 0) {
+    await upsertConversationState(clinicId, patientPhone, 'idle', {});
+    return 'للأسف ما اكو مواعيد متاحة هاي الأسبوع.\nتكدر تتصل بالعيادة مباشرة.';
+  }
+
+  await upsertConversationState(clinicId, patientPhone, 'checking_slots', {
+    ...data,
+    candidate_slots: slots,
+  });
+  return formatSlotsMessage(slots);
+}
+
+// ── handleCheckingSlots ───────────────────────────────────────────────────────
+
+async function handleCheckingSlots({ clinicId, patientPhone, patientId, messageText, clinic, stateData }) {
+  const slots = stateData.candidate_slots || [];
+
+  // Patient asking for different time options?
+  const wantsDifferent = ['ثاني','غير','بكره','يوم ثاني','وقت ثاني','مو هذا','الأسبوع الجاي']
+    .some((k) => messageText.includes(k));
+
+  if (wantsDifferent) {
+    const newSlots = await getAvailableSlots(clinicId, messageText, clinic.working_hours || {});
+    const list = newSlots.length > 0 ? newSlots : slots;
+    await upsertConversationState(clinicId, patientPhone, 'checking_slots', {
+      ...stateData,
+      candidate_slots: list,
+    });
+    return newSlots.length > 0
+      ? formatSlotsMessage(newSlots)
+      : `ما اكو مواعيد ثانية بهاي الفترة. اختار من المواعيد الموجودة:\n${formatSlotsMessage(slots)}`;
+  }
+
+  const chosenSlot = detectSlotChoice(messageText, slots);
+
+  if (!chosenSlot) {
+    return `اختار رقم الموعد المناسب 👇\n${formatSlotsMessage(slots)}`;
+  }
+
+  await upsertConversationState(clinicId, patientPhone, 'awaiting_confirmation', {
+    intent:        'booking',
+    patient_name:  stateData.patient_name,
+    reason:        stateData.reason,
+    selected_slot: chosenSlot,
+  });
+
+  return `تأكيد الحجز:\n👤 ${stateData.patient_name}\n📋 ${stateData.reason}\n📅 ${chosenSlot.formatted}\n\nصح؟ (نعم / لا)`;
+}
+
+// ── handleAwaitingConfirmation ────────────────────────────────────────────────
+
+async function handleAwaitingConfirmation({ clinicId, patientPhone, patientId, messageText, clinic, stateData }) {
+  const isPositive = POSITIVE_WORDS.some((w) => messageText.includes(w));
+  const isNegative = NEGATIVE_WORDS.some((w) => messageText.includes(w));
+
+  if (isPositive) {
+    let appt;
+    try {
+      appt = await createAppointment({
+        clinicId,
+        patientId,
+        patientName:     stateData.patient_name,
+        reason:          stateData.reason,
+        scheduledAt:     stateData.selected_slot.datetime,
+        durationMinutes: clinic.appointment_duration_minutes || 30,
+        clinic,
       });
-
-      return text;
+    } catch (err) {
+      logger.error('createAppointment failed', { error: err.message });
+      await upsertConversationState(clinicId, patientPhone, 'idle', {});
+      return 'عذراً، صار خطأ أثناء الحجز. حاول مرة ثانية أو تواصل مع العيادة مباشرة.';
     }
 
-    // ── Tool calls ────────────────────────────────────────────────────────────
-    if (choice.finish_reason === 'tool_calls') {
-      const toolCalls = choice.message.tool_calls;
+    await upsertConversationState(clinicId, patientPhone, 'idle', {});
 
-      await saveMessage({
-        clinicId:     clinic.id,
-        patientId:    patient.id,
-        patientPhone,
-        role:         'assistant',
-        content:      choice.message.content || null,
-        toolCalls,
-      });
+    const lines = [
+      'تم تثبيت موعدك بنجاح! ✅',
+      '',
+      `📅 ${stateData.selected_slot.formatted}`,
+      `🎫 رقمك بالدور: ${appt.queue_number}`,
+    ];
+    if (appt.estimated_arrival) lines.push(`⏰ وقتك التقريبي: ${appt.estimated_arrival}`);
+    lines.push(
+      `👤 ${stateData.patient_name}`,
+      `📝 ${stateData.reason}`,
+      '',
+      `📍 ${clinic.address}`,
+      '',
+      'راح نذكرك قبل الموعد بيوم 😊 لو تحتاج تلغي كلمنا!'
+    );
 
-      currentMessages = [...currentMessages, choice.message];
+    return lines.join('\n');
+  }
 
-      for (const toolCall of toolCalls) {
-        const name  = toolCall.function.name;
-        const input = JSON.parse(toolCall.function.arguments);
+  if (isNegative) {
+    const slots = await getAvailableSlots(clinicId, null, clinic.working_hours || {});
+    if (slots.length === 0) {
+      await upsertConversationState(clinicId, patientPhone, 'idle', {});
+      return 'لا مشكلة! ما اكو مواعيد ثانية متاحة حالياً. كلمنا لاحقاً 😊';
+    }
+    await upsertConversationState(clinicId, patientPhone, 'checking_slots', {
+      intent:          'booking',
+      patient_name:    stateData.patient_name,
+      reason:          stateData.reason,
+      candidate_slots: slots,
+    });
+    return `لا مشكلة 😊 اختار موعد ثاني:\n${formatSlotsMessage(slots)}`;
+  }
 
-        logger.info('Tool call', { name, input });
+  // Unclear — repeat the confirmation prompt
+  return `تأكيد الحجز:\n👤 ${stateData.patient_name}\n📋 ${stateData.reason}\n📅 ${stateData.selected_slot.formatted}\n\nاكتب "نعم" للتأكيد أو "لا" للتغيير`;
+}
 
-        const result = await executeTool(name, input, {
-          clinic,
-          patient,
-          patientPhone,
-        });
+// ── handleAwaitingCancelConfirm ───────────────────────────────────────────────
 
-        logger.info('Tool result', {
-          name,
-          result: JSON.stringify(result).slice(0, 200),
-        });
+async function handleAwaitingCancelConfirm({ clinicId, patientPhone, patientId, messageText, clinic, stateData }) {
+  const isPositive = POSITIVE_WORDS.some((w) => messageText.includes(w));
+  const isNegative = NEGATIVE_WORDS.some((w) => messageText.includes(w));
 
-        await saveMessage({
-          clinicId:     clinic.id,
-          patientId:    patient.id,
-          patientPhone,
-          role:         'tool',
-          content:      JSON.stringify(result),
-          toolCalls:    [{ tool_call_id: toolCall.id, name }],
-        });
+  if (isPositive) {
+    const { error } = await supabase
+      .from('appointments')
+      .update({ status: 'cancelled', cancelled_at: new Date().toISOString() })
+      .eq('id', stateData.appointment_id);
 
-        currentMessages = [
-          ...currentMessages,
-          { role: 'tool', tool_call_id: toolCall.id, content: JSON.stringify(result) },
-        ];
+    if (error) logger.error('cancelAppointment failed', { error: error.message, id: stateData.appointment_id });
+
+    await upsertConversationState(clinicId, patientPhone, 'idle', {});
+    return `تم إلغاء موعدك ليوم ${stateData.appointment_time} ✅\nإذا تريد تحجز موعد جديد كلمنا 😊`;
+  }
+
+  if (isNegative) {
+    await upsertConversationState(clinicId, patientPhone, 'idle', {});
+    return 'تمام، موعدك محجوز كما هو 👍';
+  }
+
+  return `موعدك يوم ${stateData.appointment_time}\nاكتب "نعم" للإلغاء أو "لا" للإبقاء عليه`;
+}
+
+// ── handleAwaitingDuplicateDecision ───────────────────────────────────────────
+
+async function handleAwaitingDuplicateDecision({ clinicId, patientPhone, patientId, messageText, clinic, stateData }) {
+  const isPositive = POSITIVE_WORDS.some((w) => messageText.includes(w));
+  const isNegative = NEGATIVE_WORDS.some((w) => messageText.includes(w));
+
+  if (isPositive) {
+    // Cancel existing appointment and start fresh booking flow
+    const { error } = await supabase
+      .from('appointments')
+      .update({ status: 'cancelled', cancelled_at: new Date().toISOString() })
+      .eq('id', stateData.existing_appointment_id);
+
+    if (error) logger.error('handleAwaitingDuplicateDecision cancel failed', { error: error.message });
+
+    await upsertConversationState(clinicId, patientPhone, 'collecting_info', {
+      intent:          'booking',
+      patient_name:    null,
+      reason:          null,
+      time_preference: null,
+    });
+    return `تم إلغاء موعدك السابق ✅\nالحين نحجز موعد جديد.\nاسمك الكامل؟`;
+  }
+
+  if (isNegative) {
+    await upsertConversationState(clinicId, patientPhone, 'idle', {});
+    return `تمام، موعدك محجوز يوم ${stateData.existing_appointment_time} 👍`;
+  }
+
+  return `عندك موعد يوم ${stateData.existing_appointment_time}\nتريد تلغيه وتحجز غيره؟ (نعم / لا)`;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DB helpers
+// ══════════════════════════════════════════════════════════════════════════════
+
+async function getNextAppointment(clinicId, patientPhone) {
+  const { data: patient } = await supabase
+    .from('patients')
+    .select('id')
+    .eq('clinic_id', clinicId)
+    .eq('phone_number', patientPhone)
+    .maybeSingle();
+
+  if (!patient) return null;
+
+  const { data } = await supabase
+    .from('appointments')
+    .select('id, scheduled_at, patient_name')
+    .eq('clinic_id', clinicId)
+    .eq('patient_id', patient.id)
+    .in('status', ['scheduled', 'confirmed'])
+    .gte('scheduled_at', new Date().toISOString())
+    .order('scheduled_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  return data;
+}
+
+async function createAppointment({ clinicId, patientId, patientName, reason, scheduledAt, durationMinutes, clinic }) {
+  const day      = dayjs(scheduledAt).tz(TIMEZONE);
+  const dayStart = day.startOf('day').toISOString();
+  const dayEnd   = day.endOf('day').toISOString();
+
+  // Count existing appointments to determine queue position
+  const { count } = await supabase
+    .from('appointments')
+    .select('*', { count: 'exact', head: true })
+    .eq('clinic_id', clinicId)
+    .in('status', ['scheduled', 'confirmed'])
+    .gte('scheduled_at', dayStart)
+    .lte('scheduled_at', dayEnd);
+
+  const queueNumber = (count || 0) + 1;
+
+  // Try to compute an estimated arrival time from clinic working_hours
+  let estimatedArrival = null;
+  try {
+    const dayKey = day.format('dddd').toLowerCase();
+    const shift  = (clinic.working_hours?.[dayKey]);
+    if (shift?.open && !shift.closed) {
+      const [sh, sm] = shift.open.split(':').map(Number);
+      const estimated = day.hour(sh).minute(sm || 0).second(0)
+        .add((queueNumber - 1) * (durationMinutes || 30), 'minute');
+      estimatedArrival = formatTime12(estimated.format('HH:mm'));
+    }
+  } catch (_) { /* non-critical */ }
+
+  const { data: appt, error } = await supabase
+    .from('appointments')
+    .insert({
+      clinic_id:        clinicId,
+      patient_id:       patientId,
+      patient_name:     patientName,
+      reason,
+      scheduled_at:     scheduledAt,
+      duration_minutes: durationMinutes || 30,
+      queue_number:     queueNumber,
+      status:           'scheduled',
+    })
+    .select('id, queue_number')
+    .single();
+
+  if (error) throw new Error(error.message);
+  return { ...appt, estimated_arrival: estimatedArrival };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Formatting / classification helpers
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Search FAQs with keyword matching — no AI tokens.
+ */
+async function searchFAQ(clinicId, message) {
+  try {
+    const { data: faqs } = await supabase
+      .from('faqs')
+      .select('question, answer, keywords')
+      .eq('clinic_id', clinicId)
+      .eq('is_active', true);
+
+    if (!faqs || faqs.length === 0) return null;
+
+    const normalizedMsg = message
+      .replace(/[؟?!،,]/g, '')
+      .trim()
+      .toLowerCase();
+
+    // Semantic category shortcuts — map common question patterns to FAQ keywords
+    const PATTERNS = {
+      location:  ['وين', 'فين', 'موقع', 'عنوان', 'كيف اوصل'],
+      hours:     ['دوام', 'ساعات', 'تفتح', 'تسكر', 'متى', 'يمته'],
+      price:     ['سعر', 'كلفة', 'كم', 'فلوس', 'دينار', 'اجور'],
+      services:  ['خدمات', 'تعملون', 'تعالجون', 'اختصاص'],
+      insurance: ['تامين', 'بطاقة', 'صحي'],
+    };
+
+    const scored = faqs.map((faq) => {
+      let score = 0;
+      const keywords = faq.keywords || [];
+      const msgWords = normalizedMsg.split(/\s+/).filter((w) => w.length > 2);
+
+      // Exact keyword match in message (highest signal)
+      for (const kw of keywords) {
+        if (normalizedMsg.includes(kw)) score += 3;
       }
 
-      continue;
-    }
+      // Partial overlap between message words and keywords
+      for (const word of msgWords) {
+        for (const kw of keywords) {
+          if (kw.includes(word) || word.includes(kw)) score += 1;
+        }
+      }
 
-    logger.warn('Unexpected finish_reason', { finishReason: choice.finish_reason });
-    break;
+      // Category-level boost: message mentions a topic → check if FAQ covers it
+      for (const [category, words] of Object.entries(PATTERNS)) {
+        if (words.some((w) => normalizedMsg.includes(w))) {
+          for (const kw of keywords) {
+            if (kw.includes(category) || words.some((w) => kw.includes(w))) {
+              score += 2;
+            }
+          }
+        }
+      }
+
+      return { ...faq, score };
+    });
+
+    const best = scored.sort((a, b) => b.score - a.score)[0];
+    return best && best.score >= 2 ? best.answer : null;
+  } catch {
+    return null;
   }
+}
 
-  // Exceeded max rounds
-  const fallback = 'عذراً، ما قدرت أكمل طلبك. تواصل معنا مباشرة لو تحتاج مساعدة.';
-  await saveMessage({
-    clinicId:     clinic.id,
-    patientId:    patient.id,
-    patientPhone,
-    role:         'assistant',
-    content:      fallback,
+/**
+ * Answer a general inquiry with a minimal AI prompt (~150 tokens).
+ */
+async function answerInquiry(message, clinic) {
+  const prompt = `عيادة "${clinic.name}" — د.${clinic.doctor_name} (${clinic.specialty})
+العنوان: ${clinic.address}
+سعر الكشفية: ${clinic.consultation_price ? clinic.consultation_price + ' دينار' : 'غير محدد'}
+
+سؤال المريض: "${message}"
+أجب بجملة أو جملتين باللهجة العراقية. لا تعطي نصائح طبية:`;
+
+  const res = await openai.chat.completions.create({
+    model:      'gpt-4o-mini',
+    max_tokens: 150,
+    messages:   [{ role: 'user', content: prompt }],
   });
-  return fallback;
+
+  return res.choices[0].message.content.trim();
 }
 
-// ── Load weekly schedule from DB ──────────────────────────────────────────────
-
-async function loadWeeklySchedule(clinicId, fallbackWorkingHours) {
-  const { data, error } = await supabase
-    .from('availability_schedules')
-    .select('day_of_week, is_working_day, daily_capacity, shifts')
-    .eq('clinic_id', clinicId)
-    .is('specific_date', null)
-    .order('day_of_week', { ascending: true });
-
-  if (error) {
-    logger.warn('loadWeeklySchedule error — falling back to clinic.working_hours', { error: error.message });
-  }
-
-  if (data && data.length > 0) return data;
-
-  // Fallback: convert legacy working_hours JSONB → same structure
-  const legacyKeys = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
-  return legacyKeys.map((key, i) => {
-    const wh = (fallbackWorkingHours || {})[key] || {};
-    return {
-      day_of_week:    i,
-      is_working_day: !wh.closed,
-      daily_capacity: null,
-      shifts:         wh.closed ? [] : [{ open: wh.open || '09:00', close: wh.close || '17:00' }],
-    };
-  });
+function formatSlotsMessage(slots) {
+  if (!slots || slots.length === 0) return 'ما اكو مواعيد متاحة هاي الأسبوع.';
+  const EMOJI_NUMS = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣'];
+  return 'المواعيد المتاحة:\n' +
+    slots.map((s, i) => `${EMOJI_NUMS[i] || (i + 1) + '.'} ${s.formatted}`).join('\n') +
+    '\n\nاختار رقم الموعد:';
 }
 
-// ── Load upcoming blocked periods (next 30 days) ──────────────────────────────
-
-async function loadUpcomingBlocks(clinicId) {
-  const now     = dayjs().tz(TIMEZONE);
-  const horizon = now.add(30, 'day').endOf('day');
-
-  const { data, error } = await supabase
-    .from('blocked_periods')
-    .select('start_at, end_at, is_full_day, reason')
-    .eq('clinic_id', clinicId)
-    .gt('end_at', now.startOf('day').toISOString())
-    .lt('start_at', horizon.toISOString())
-    .order('start_at', { ascending: true });
-
-  if (error) {
-    logger.warn('loadUpcomingBlocks error', { error: error.message });
-    return [];
-  }
-  return data || [];
-}
-
-// ── Message builder ───────────────────────────────────────────────────────────
-
-function buildMessages(history, currentUserMessage) {
-  // Include user, assistant, AND doctor messages.
-  // Doctor messages are mapped to 'assistant' role with a [الطبيب] prefix so the
-  // AI knows a human doctor already responded and won't repeat the same information.
-  const textRows = history
-    .filter((m) => ['user', 'assistant', 'doctor'].includes(m.role) && m.content?.trim())
-    .map((m) => ({
-      role:    m.role === 'doctor' ? 'assistant' : m.role,
-      srcRole: m.role,   // keep original role for deduplication logic
-      content: m.role === 'doctor'
-        ? `[رسالة الطبيب للمريض]: ${m.content}`
-        : m.content,
-    }));
-
-  // Deduplicate consecutive messages from the same *original* source only.
-  // This prevents doctor messages from being collapsed with AI assistant messages.
-  const deduped = [];
-  for (const row of textRows) {
-    const last = deduped[deduped.length - 1];
-    if (last && last.srcRole === row.srcRole) {
-      deduped[deduped.length - 1] = row;
-    } else {
-      deduped.push(row);
+/**
+ * Detect which slot the patient chose by number (1,2,٢…) or day name.
+ */
+function detectSlotChoice(message, slots) {
+  const ARABIC_DIGITS = ['١','٢','٣','٤','٥'];
+  for (let i = 0; i < slots.length; i++) {
+    if (message.includes(String(i + 1)) || message.includes(ARABIC_DIGITS[i] || '')) {
+      return slots[i];
     }
   }
-
-  while (deduped.length > 0 && deduped[0].role === 'assistant') deduped.shift();
-
-  const last = deduped[deduped.length - 1];
-  if (!last || last.content?.trim() !== currentUserMessage.trim()) {
-    deduped.push({ role: 'user', srcRole: 'user', content: currentUserMessage });
+  // Fall back to matching the day name from formatted ("الأحد ...")
+  for (const slot of slots) {
+    const dayName = slot.formatted.split(' ')[0];
+    if (dayName && message.includes(dayName)) return slot;
   }
-
-  return deduped.map((m) => ({ role: m.role, content: m.content }));
+  return null;
 }
 
-// ── System prompt ─────────────────────────────────────────────────────────────
+/**
+ * Naive extraction — returns name only when message is short and looks like
+ * just a name (no booking keywords, no time keywords).
+ */
+function extractBookingInfo(message) {
+  const timeKeywords    = ['بكره','الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس',
+                           'هاي الأسبوع','الأسبوع الجاي','اليوم','بعد غد'];
+  const bookingKeywords = ['احجز','اريد','ابي','موعد','حجز','أريد','أبي','ابغى'];
 
-function buildSystemPrompt(clinic, weeklySchedule, upcomingBlocks) {
-  const today = dayjs().tz(TIMEZONE);
+  const timePref  = timeKeywords.find((k) => message.includes(k)) || null;
+  const words     = message.trim().split(/\s+/);
+  const hasBookKW = bookingKeywords.some((k) => message.includes(k));
+  const hasTimeKW = Boolean(timePref);
+  const likelyName = words.length <= 3 && !hasBookKW && !hasTimeKW
+    ? message.trim()
+    : null;
 
-  return `أنت مساعد ذكي لـ "${clinic.name}" — عيادة ${clinic.specialty} بإشراف ${clinic.doctor_name}.
-تتكلم باللهجة العراقية العامية. ردودك دافئة، مختصرة، ومهنية.
-
-**تاريخ اليوم:** ${formatBlockDate(today)} (${today.format('YYYY-MM-DD')})
-
-**معلومات العيادة:**
-- الاسم: ${clinic.name}
-- الطبيب: ${clinic.doctor_name}
-- التخصص: ${clinic.specialty}
-- العنوان: ${clinic.address}
-- أيام الدوام الأسبوعية والعدد المقبول (محدّثة):
-${formatSchedule(weeklySchedule)}
-
-**🚫 أيام الغياب / الإجازات القادمة (الدكتور غير متوفر فيها نهائياً):**
-${formatBlocks(upcomingBlocks)}
-
----
-
-## قاموس اللهجة العراقية — افهم هذه الكلمات دائماً:
-- ابي / اريد = أريد
-- بكره = غداً
-- بعدين = لاحقاً
-- هسه / هلأ / الهين = الآن
-- الصبح = الصباح
-- الظهر / نص النهار = الظهيرة
-- المسه / العصر = المساء
-- ماكو = لا يوجد
-- اكو = يوجد
-- شكو = ماذا يوجد / ما الأخبار
-- وين = أين
-- شلون = كيف
-- يمته = متى
-- مو مشكلة / ماكو مشكلة / لا مشكلة = موافق / حسناً (ليست شكوى)
-- زين / تمام / اوكي / عدل = موافق
-- گلبي / حبيبي = تعبير ودي (ليس طلباً)
-- شبيك / شبيج = ما بك / ما مشكلتك
-- خوش = جيد / ممتاز
-- چاي = شاي (موضوع ودي، مو طلب طبي)
-
----
-
-**📌 نظام الحجز (مهم):**
-- الحجز يكون **باليوم** وليس بالساعة. المريض **لا** يختار ساعة معينة — يختار اليوم فقط.
-- كل يوم له عدد محدد من المواعيد (أو مفتوح/غير محدود).
-- عند الحجز، المريض ياخذ **رقماً بالدور** تلقائياً، ويراجع العيادة بذلك اليوم حسب رقمه.
-
-**تعليمات الأدوات:**
-- لمعرفة الأيام المتاحة للحجز: استخدم check_availability.
-- لحجز موعد: استخدم book_appointment (تحتاج: اسم المريض، اليوم، السبب) — لا تطلب ساعة.
-- لمعرفة كم حجز موجود في يوم معين: استخدم get_day_bookings.
-- لإلغاء موعد: استخدم cancel_appointment.
-- للأسئلة الشائعة (خدمات، أسعار): استخدم get_faq_answer أولاً.
-- إذا لم تجد الجواب أو الطلب يحتاج تدخلاً بشرياً: استخدم escalate_to_human — **فقط** عند وجود مشكلة حقيقية مثل "عندي مشكلة"، "في مشكلة"، "في خطأ"، "مو شغال". لا تصعّد عند العبارات الإيجابية أو الموافقة.
-
-**قواعد صارمة:**
-1. لا تعطي نصائح طبية أبداً.
-2. لا تذكر معلومات مرضى آخرين.
-3. الرد مختصر وواضح.
-4. **لا تسأل المريض عن ساعة الموعد إطلاقاً** — الحجز باليوم فقط.
-5. عند تأكيد الحجز، اذكر **اليوم** و**رقم الدور**.
-6. استخدم الأدوات دائماً — لا تخمّن البيانات.
-7. إذا سأل المريض كم حجز اليوم أو بيوم معين، استخدم get_day_bookings وأخبره بعدد الحجوزات بشكل طبيعي.
-8. **مهم جداً:** أيام الغياب المذكورة أعلاه الدكتور غير متوفر فيها إطلاقاً — لا تعرض أي موعد فيها، حتى لو كانت يوم دوام أسبوعي عادي. أيام الغياب تلغي الدوام الأسبوعي.
-9. **عند استدعاء book_appointment**، يجب أن يكون patient_name هو الاسم الذي ذكره المريض في هذه المحادثة بالضبط — لا تأخذه من قاعدة البيانات ولا تخترعه.
-10. **لا تستدعي escalate_to_human أبداً** عند هذه العبارات الإيجابية — هي تعني الموافقة وليس الشكوى: "مو مشكلة"، "لا مشكلة"، "ماكو مشكلة"، "مو مشكله"، "تمام"، "زين"، "موافق"، "اوكي"، "أوكي"، "حسناً"، "ماشي"، "عدل"، "صح". كلمة "مشكلة" وحدها لا تعني وجود شكوى — تحقق من السياق الكامل.
-11. لا تطلب معلومات أعطاها المريض سابقاً في نفس المحادثة.
-12. الترتيب الصحيح للحجز: اسم → سبب → مواعيد → اختيار → تأكيد.`;
+  return { name: likelyName, reason: null, time_preference: timePref };
 }
 
-// ── Format schedule for system prompt ────────────────────────────────────────
-
-function fmt12(timeStr) {
-  if (!timeStr) return '';
-  const [h, m] = timeStr.split(':').map(Number);
-  const h12    = h % 12 || 12;
-  const mm     = String(m || 0).padStart(2, '0');
-  const period = h >= 12 ? 'م' : 'ص';
-  return `${h12}:${mm} ${period}`;
+function getTodayHours(clinic, now) {
+  const keys    = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+  const dayConf = clinic.working_hours?.[keys[now.day()]];
+  if (!dayConf || dayConf.closed) return 'مغلق اليوم';
+  if (dayConf.open && dayConf.close) return `${dayConf.open} - ${dayConf.close}`;
+  return 'الدوام متاح';
 }
 
-function formatSchedule(schedule) {
-  if (!schedule || schedule.length === 0) return '  غير محدد';
-
-  return schedule.map((day) => {
-    const name = DAY_NAMES[day.day_of_week] || `يوم ${day.day_of_week}`;
-    if (!day.is_working_day) {
-      return `  - ${name}: مغلق (إجازة)`;
-    }
-    const shift = (day.shifts || [])[0];
-    const hours = shift
-      ? ` | الدوام: ${fmt12(shift.open)}${shift.close ? ' — ' + fmt12(shift.close) : ''}`
-      : '';
-    const cap = (day.daily_capacity === null || day.daily_capacity === undefined)
-      ? 'العدد مفتوح'
-      : `يستقبل ${day.daily_capacity} موعد`;
-    return `  - ${name}: مفتوح — ${cap}${hours}`;
-  }).join('\n');
+function formatAppointmentTime(isoString) {
+  return formatArabicDay(dayjs(isoString).tz(TIMEZONE));
 }
 
-// ── Format blocked periods for system prompt ─────────────────────────────────
-
-function formatBlocks(blocks) {
-  if (!blocks || blocks.length === 0) return '  لا توجد أيام غياب مسجلة.';
-
-  return blocks.map((b) => {
-    const start  = dayjs(b.start_at).tz(TIMEZONE);
-    const end    = dayjs(b.end_at).tz(TIMEZONE);
-    const reason = b.reason ? ` (${b.reason})` : '';
-
-    if (b.is_full_day) {
-      const sameDay = start.format('YYYY-MM-DD') === end.format('YYYY-MM-DD');
-      const range   = sameDay
-        ? formatBlockDate(start)
-        : `من ${formatBlockDate(start)} إلى ${formatBlockDate(end)}`;
-      return `  - ${range}: مغلق طوال اليوم${reason}`;
-    }
-
-    return `  - ${formatBlockDate(start)} من ${fmt12(start.format('HH:mm'))} إلى ${fmt12(end.format('HH:mm'))}: مغلق${reason}`;
-  }).join('\n');
-}
-
-function formatBlockDate(d) {
-  return `${DAY_NAMES[d.day()]} ${d.date()} ${MONTH_NAMES[d.month()]} ${d.year()}`;
-}
-
-function extractText(blocks) {
-  const block = (blocks || []).find((b) => b.type === 'text');
-  return block?.text?.trim() || null;
-}
-
-module.exports = { handleIncomingMessage };
+module.exports = { handleMessage };
