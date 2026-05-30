@@ -40,7 +40,17 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
     return reply;
   }
 
-  // 3. FAQ Check
+  // 3. Price intent check — let AI decide regardless of phrasing
+  if (clinic.consultation_price) {
+    const askingPrice = await isAskingAboutConsultationPrice(trimmedMsg);
+    if (askingPrice) {
+      const reply = `سعر الكشفية ${clinic.consultation_price} دينار 😊`;
+      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+      return reply;
+    }
+  }
+
+  // 4. FAQ Check
   const faqRes = await checkFaqDirect(trimmedMsg, clinic.id);
   if (faqRes.found && faqRes.answer) {
     await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: faqRes.answer });
@@ -359,6 +369,25 @@ function formatBlockDate(d) {
 function extractText(blocks) {
   const block = (blocks || []).find((b) => b.type === 'text');
   return block?.text?.trim() || null;
+}
+
+// ── isAskingAboutConsultationPrice ────────────────────────────────────────────
+// Tiny AI call (~10 tokens) — catches any phrasing without keyword lists.
+
+async function isAskingAboutConsultationPrice(message) {
+  try {
+    const res = await client.chat.completions.create({
+      model:      'gpt-4o-mini',
+      max_tokens: 5,
+      messages:   [{
+        role:    'user',
+        content: `رسالة: "${message}"\nهل المريض يسأل عن سعر أو تكلفة زيارة الطبيب (الكشفية)؟\nأجب بكلمة واحدة: yes أو no`,
+      }],
+    });
+    return res.choices[0].message.content.trim().toLowerCase().startsWith('yes');
+  } catch {
+    return false;
+  }
 }
 
 module.exports = { handleIncomingMessage };
