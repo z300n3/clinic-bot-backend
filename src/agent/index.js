@@ -32,18 +32,20 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
     return reply;
   }
 
-  // 2. Out of Scope Check
-  const outOfScopeRegex = /(دواء|علاج|تشخيص|مرض|عملية)/i;
-  if (outOfScopeRegex.test(trimmedMsg)) {
-    const reply = "عذراً، أنا مساعد حجز فقط 😊\nأكدر أساعدك بـ: حجز موعد، أوقات الدوام، العنوان، أو السعر.";
+  // 2. Out of Scope Check — only catch explicit medical advice requests
+  //    (e.g. "شنو علاج الصداع", "وصفلي دواء")
+  //    Price questions about medicine are NOT medical advice → let AI handle them naturally
+  const medicalAdviceRegex = /^.*(وصف|وصفلي|اعطني|شنو علاج|شنو دواء|كيف اعالج).*(دواء|علاج|حبوب)/i;
+  if (medicalAdviceRegex.test(trimmedMsg)) {
+    const reply = "ما أكدر أساعدك بهالموضوع، بس أكدر أساعدك بحجز موعد عند الدكتور وهو يفيدك أكثر 😊";
     await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
     return reply;
   }
 
-  // 3. Price intent check — let AI decide regardless of phrasing
+  // 3. Price intent check — regex covers Iraqi dialect patterns (0 tokens)
   if (clinic.consultation_price) {
-    const askingPrice = await isAskingAboutConsultationPrice(trimmedMsg);
-    if (askingPrice) {
+    const priceRegex = /(سعر|شكد|شگد|كم|اجور|أجور|كلف|تكلف|كشفية|الكشف|فحص|فلوس|مبلغ|قيمة|ابيش|أبيش|بيش|باص|الباص).*(سعر|كشف|كشفية|فحص|زيارة|دكتور|طبيب|عيادة|موعد|مراجعة|الدوام|باص|الباص|ابيش|أبيش)|^(السعر|سعر الكشفية|شكد الكشفية|كم الكشفية|سعر الكشف|سعر الفحص|شكد|شگد|ابيش|أبيش|الباص|باص الدكتور|باص الطبيب|سعر الباص|شكد الباص|ابيش الباص|الباص شكد|الباص ابيش)$/i;
+    if (priceRegex.test(trimmedMsg)) {
       const reply = `سعر الكشفية ${clinic.consultation_price} دينار 😊`;
       await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
       return reply;
@@ -281,33 +283,26 @@ function buildSystemPrompt(clinic, weeklySchedule, upcomingBlocks) {
   return `أنت مساعد حجز لـ "${clinic.name}" (${clinic.specialty}).
 تحدث باللهجة العراقية باختصار.
 
-نطاق عملك المسموح:
-1. الحجز والإلغاء (حسب القواعد).
-2. الإجابة عن أوقات الدوام، العنوان، والأسعار.
-${priceInstruction}
-
-**قاعدة السعر (مهم جداً):**
-- إذا سأل المريض عن "السعر" أو "الكشفية" أو "الأجور" أو أي كلمة تعني سعر الزيارة → ${clinic.consultation_price ? `أجبه فوراً: "سعر الكشفية هو ${clinic.consultation_price} دينار"` : 'قل له: "تگدر تتصل بالعيادة للاستفسار عن السعر"'}.
-- إذا سأل عن سعر دواء أو مستلزم طبي → لا تستخدم رسالة الرفض الطبية، بدلها قل: "ما أعرف أسعار الأدوية، بس أكدر أساعدك بحجز موعد عند الدكتور."
-
-نطاق عملك الممنوع:
-ممنوع تقديم أي استشارة طبية، وصف دواء، أو تشخيص.
-فقط في حال سألك المريض سؤالاً طبياً صريحاً (مثل: "شو علاج كذا" أو "شو أاخذ لألم كذا")، اعتذر فوراً بهذا النص الحرفي فقط:
-"عذراً، أنا مساعد حجز فقط 😊 أكدر أساعدك بـ: حجز موعد، أوقات الدوام، العنوان، أو السعر."
-(تنبيه: لا تستخدم رسالة الرفض أعلاه أبداً إذا كان السؤال عن السعر أو العنوان أو الأوقات أو سعر دواء).
-
-الطبيب: ${clinic.doctor_name} | السعر: ${priceText} | العنوان: ${clinic.address}
+الطبيب: ${clinic.doctor_name} | سعر الكشفية: ${priceText} | العنوان: ${clinic.address}
 دوام الأسبوع:
 ${formatSchedule(weeklySchedule)}
 إجازات قادمة:
 ${formatBlocks(upcomingBlocks)}
+تاريخ اليوم: ${formatBlockDate(today)} (${today.format('YYYY-MM-DD')})
+الوقت الحالي: ${fmt12(today.format('HH:mm'))} — دوام اليوم: ${todayHours}
+
+تگدر تساعد بـ: حجز موعد، إلغاء موعد، أوقات الدوام، العنوان، سعر الكشفية.
+${priceInstruction}
 
 قواعد:
 - الحجز باليوم فقط، لا تسأل عن الساعة.
 - احجز عبر الأداة بعد معرفة الاسم، اليوم، السبب.
+- لا تعطي نصائح طبية أبداً (لا تشخيص، لا وصف دواء، لا علاج).
 
-تاريخ اليوم: ${formatBlockDate(today)} (${today.format('YYYY-MM-DD')})
-الوقت الحالي: ${fmt12(today.format('HH:mm'))} — دوام اليوم: ${todayHours}`;
+**مهم جداً — كيف ترد على رسائل خارج نطاقك:**
+- إذا سأل عن شيء ما تعرفه أو خارج نطاقك → قل: "ما أكدر أساعدك بهالموضوع، بس أكدر أساعدك بحجز موعد، أوقات الدوام، العنوان، أو سعر الكشفية 😊"
+- لا تستخدم عبارة "أنا مساعد حجز فقط" أبداً.
+- لا ترفض بشكل جاف — دائماً وجّه المريض لشيء تكدر تساعده بيه.`;
 }
 
 // ── Format schedule for system prompt ────────────────────────────────────────
@@ -369,25 +364,6 @@ function formatBlockDate(d) {
 function extractText(blocks) {
   const block = (blocks || []).find((b) => b.type === 'text');
   return block?.text?.trim() || null;
-}
-
-// ── isAskingAboutConsultationPrice ────────────────────────────────────────────
-// Tiny AI call (~10 tokens) — catches any phrasing without keyword lists.
-
-async function isAskingAboutConsultationPrice(message) {
-  try {
-    const res = await client.chat.completions.create({
-      model:      'gpt-4o-mini',
-      max_tokens: 5,
-      messages:   [{
-        role:    'user',
-        content: `رسالة: "${message}"\nهل المريض يسأل عن سعر أو تكلفة زيارة الطبيب (الباص باص الطبيب)(الكشفية)؟\nأجب بكلمة واحدة: yes أو no`,
-      }],
-    });
-    return res.choices[0].message.content.trim().toLowerCase().startsWith('yes');
-  } catch {
-    return false;
-  }
 }
 
 module.exports = { handleIncomingMessage };
