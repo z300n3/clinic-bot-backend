@@ -182,9 +182,11 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
 
         logger.info('Tool call', { name, args });
 
-        // Fix 3: Intercept booking flows to check for existing appointment
-        if ((name === 'check_availability' || name === 'book_appointment') && subState === 'idle') {
-          const { data: existing } = await supabase
+        // Fix 3: Intercept booking flows to check for existing appointment for the SAME person
+        if (name === 'book_appointment' && subState === 'idle') {
+          const targetName = args.patient_name?.trim() || patient.name?.trim() || '';
+          
+          const { data: existingAppts } = await supabase
             .from('appointments')
             .select('id, scheduled_at, patient_name')
             .eq('clinic_id', clinic.id)
@@ -192,9 +194,14 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
             .in('status', ['scheduled', 'confirmed'])
             .gte('scheduled_at', new Date().toISOString())
             .lte('scheduled_at', dayjs().add(7, 'day').toISOString())
-            .order('scheduled_at', { ascending: true })
-            .limit(1)
-            .maybeSingle();
+            .order('scheduled_at', { ascending: true });
+
+          const existing = (existingAppts || []).find(a => {
+            const aName = a.patient_name?.trim() || patient.name?.trim() || '';
+            // If both don't have explicit names, they match (both are the main patient)
+            // Or if the names match exactly.
+            return (!aName && !targetName) || (aName === targetName);
+          });
 
           if (existing) {
             await upsertConversationState(clinic.id, patientPhone, 'active', {
