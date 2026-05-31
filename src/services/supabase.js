@@ -23,7 +23,7 @@ async function getClinicByPhoneNumberId(phoneNumberId) {
 
 // ── Patients ─────────────────────────────────────────────────────────────────
 
-async function findOrCreatePatient(clinicId, phoneNumber) {
+async function findOrCreatePatient(clinicId, phoneNumber, profileName) {
   // Try to find existing patient first
   const { data: existing } = await supabase
     .from('patients')
@@ -33,16 +33,24 @@ async function findOrCreatePatient(clinicId, phoneNumber) {
     .maybeSingle();
 
   if (existing) {
+    const updateData = { last_seen_at: new Date().toISOString() };
+    if (profileName && !existing.name) {
+      updateData.name = profileName;
+    }
     await supabase
       .from('patients')
-      .update({ last_seen_at: new Date().toISOString() })
+      .update(updateData)
       .eq('id', existing.id);
+    
+    if (profileName && !existing.name) {
+      existing.name = profileName;
+    }
     return existing;
   }
 
   const { data: created, error } = await supabase
     .from('patients')
-    .insert({ clinic_id: clinicId, phone_number: phoneNumber })
+    .insert({ clinic_id: clinicId, phone_number: phoneNumber, name: profileName || null })
     .select()
     .single();
 

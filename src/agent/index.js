@@ -270,6 +270,13 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
           }
         }
 
+        // Out of Scope Interceptor
+        if (name === 'out_of_scope_response') {
+          const reply = 'عذراً، عملي كسكرتير آلي يقتصر على حجز المواعيد والإجابة على الاستفسارات الخاصة بالعيادة فقط.';
+          await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+          return reply;
+        }
+
         const result = await executeTool(name, args, {
           clinic,
           patient,
@@ -441,9 +448,9 @@ ${priceInstruction}
 - حاول تساعد المريض دائماً قبل ما ترفض أي طلب.
 - إذا سأل "شوكت موعدي" أو "هل انا حاجز" أو "رقمي" → استخدم أداة cancel_appointment للبحث عن موعده (بدون ما تلغيه)، وأخبره بالمعلومات.
 - إذا سأل عن السعر/الكشفية/الباص/ابيش بأي صياغة → أجبه بسعر الكشفية: ${priceText}.
+- إذا كانت رسالة المريض عبارة عن استفسار أو طلب خارج نطاق مهامك كسكرتير للعيادة أو لا علاقة له بالحجوزات والمواعيد → استخدم أداة out_of_scope_response فوراً لتوجيه رسالة ثابتة للمريض.
 - إذا ما فهمت الرسالة → اسأل المريض يوضح شنو يريد، لا ترفض مباشرة.
-- إذا طلب شيء فعلاً خارج قدرتك → وجّهه بلطف: "تگدر تتصل بالعيادة مباشرة وينساعدونك بهالموضوع 😊"
-- ممنوع تستخدم أي رسالة رفض جاهزة أو تقول "أنا مساعد حجز فقط".`;
+- إذا طلب شيء فعلاً يخص العيادة لكنه خارج قدرتك → وجّهه بلطف للاتصال بالعيادة مباشرة.`;
 }
 
 // ── Format schedule for system prompt ────────────────────────────────────────

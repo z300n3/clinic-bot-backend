@@ -46,6 +46,7 @@ router.post('/', async (req, res) => {
 
         const value         = change.value;
         const phoneNumberId = value.metadata?.phone_number_id;
+        const profileName   = value.contacts?.[0]?.profile?.name || null;
 
         // Log status updates (read receipts, delivery) but don't act on them
         for (const status of value.statuses || []) {
@@ -103,6 +104,7 @@ router.post('/', async (req, res) => {
           processMessage({
             phoneNumberId,
             from:           message.from,
+            profileName,
             messageId:      message.id,
             text,
             messageType,
@@ -123,7 +125,7 @@ router.post('/', async (req, res) => {
 // Handles deduplication and starts/resets the debounce timer.
 // The heavy AI work is deferred to processDebounced().
 
-async function processMessage({ phoneNumberId, from, messageId, text, messageType, originalMediaId }) {
+async function processMessage({ phoneNumberId, from, profileName, messageId, text, messageType, originalMediaId }) {
   logger.info('Processing message', {
     from,
     messageId,
@@ -139,7 +141,7 @@ async function processMessage({ phoneNumberId, from, messageId, text, messageTyp
   }
 
   // 2. Upsert patient
-  const patient = await findOrCreatePatient(clinic.id, from);
+  const patient = await findOrCreatePatient(clinic.id, from, profileName);
 
   // 3. Save user message — returns null if duplicate (idempotent)
   const saved = await saveMessage({
