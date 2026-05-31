@@ -52,11 +52,22 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
     }
   }
 
+  // 4. Location intent check (0 tokens)
+  const locationRegex = /^(وين|فين|عنوان|مكان|موقع|شلون).*(العيادة|دكتور|طبيب|مكانكم|عنوانكم|اوصل|أوصل)/i;
+  if (locationRegex.test(trimmedMsg)) {
+    const reply = `عنوان العيادة: ${clinic.address || 'غير محدد في النظام، يرجى الاتصال بنا.'} 📍`;
+    await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+    return reply;
+  }
+
+  // 5. Dynamic Context Injection
+  const isBookingIntent = /(موعد|حجز|احجز|وقت|ساعة|متى|يوم|باجر|عگب|غدا|اليوم|ايام|داوم|مفتوحين|شوكت|متواجد|يمته|اجي)/i.test(trimmedMsg);
+
   // Load history + live schedule + upcoming blocks + conversation state in parallel
   const [history, weeklySchedule, upcomingBlocks, stateRes] = await Promise.all([
-    loadConversationHistory(clinic.id, patientPhone, 10),
-    loadWeeklySchedule(clinic.id, clinic.working_hours),
-    loadUpcomingBlocks(clinic.id),
+    loadConversationHistory(clinic.id, patientPhone, 8),
+    isBookingIntent ? loadWeeklySchedule(clinic.id, clinic.working_hours) : Promise.resolve([]),
+    isBookingIntent ? loadUpcomingBlocks(clinic.id) : Promise.resolve([]),
     supabase.from('conversation_state').select('state_data').eq('clinic_id', clinic.id).eq('patient_phone', patientPhone).maybeSingle(),
   ]);
 

@@ -79,6 +79,15 @@ const toolDefinitions = [
       required: [],
     },
   },
+  {
+    name: 'greeting_response',
+    description: 'استخدم هذه الأداة للرد بشكل ثابت عندما تكون رسالة المريض عبارة عن ترحيب فقط (مثل: السلام عليكم، هلو، مرحبا) ولا تحتوي على طلب واضح.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  },
 ];
 
 // ── Router ────────────────────────────────────────────────────────────────────
@@ -90,7 +99,6 @@ async function executeTool(name, input, context) {
     case 'get_day_bookings':    return getDayBookings(input, context);
     case 'cancel_appointment':  return cancelAppointment(input, context);
     case 'escalate_to_human':   return escalateToHuman(input, context);
-    case 'out_of_scope_response': return { success: true, message: 'أنا مجرد سكرتير آلي للحجوزات فقط.' };
     default:
       return { error: `أداة غير معروفة: ${name}` };
   }
