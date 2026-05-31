@@ -264,10 +264,10 @@ async function bookAppointment({ patient_name, appointment_date, reason }, { cli
     const bookedAppts = bookedRes.data || [];
     const booked    = bookedAppts.length;
 
-    // Fix 5: Prevent duplicate bookings from same patient
-    const sameDayAppt = bookedAppts.find(a => String(a.patient_id) === String(patient.id));
+    // Fix 5: Prevent duplicate bookings for the EXACT same name from the same phone
+    const sameDayAppt = bookedAppts.find(a => String(a.patient_id) === String(patient.id) && a.patient_name === patient_name);
     if (sameDayAppt) {
-      return { success: false, error: 'عندك موعد محجوز بنفس اليوم. لا يمكن حجز موعدين بنفس اليوم.' };
+      return { success: false, error: `يوجد موعد محجوز مسبقاً باسم "${patient_name}" في هذا اليوم. لا يمكن حجز موعدين بنفس الاسم في نفس اليوم.` };
     }
 
     const { isWorking, capacity, shifts } = getDayConfig(targetDay, schedules, clinic.working_hours || {});
