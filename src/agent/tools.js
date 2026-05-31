@@ -312,31 +312,40 @@ async function bookAppointment({ patient_name, appointment_date, reason }, { cli
       workHoursLine  = `🕐 دوام العيادة: ${openFmt}${closeFmt}`;
     }
 
-    // Fix 1: Add confirmation before booking
-    const pendingBooking = {
-      patient_name: patient_name || null,
-      scheduled_at: scheduledAt.toISOString(),
-      duration_minutes: clinic.appointment_duration_minutes || 30,
-      queue_number: queueNumber,
-      reason,
-      estimatedLine,
-      workHoursLine
-    };
+    // Direct Booking Insertion (Confirmation Step Removed)
+    const { data: appt, error } = await supabase
+      .from('appointments')
+      .insert({
+        clinic_id: clinic.id,
+        patient_id: patient.id,
+        scheduled_at: scheduledAt.toISOString(),
+        duration_minutes: duration,
+        queue_number: queueNumber,
+        status: 'scheduled',
+        reason: reason,
+        patient_name: patient_name || null
+      })
+      .select('id')
+      .single();
 
-    // context.patientPhone is passed in executeTool
-    await upsertConversationState(clinic.id, patient.phone_number, 'active', {
-      booking_substate: 'awaiting_confirmation',
-      pending_booking: pendingBooking
-    });
+    if (error) {
+      logger.error('Booking insert error', { error: error.message });
+      return { success: false, error: 'فشل حفظ الموعد في النظام.' };
+    }
+
+    const ref = appt.id.slice(-6).toUpperCase();
 
     const lines = [
-      `تأكيد الحجز:`,
-      `👤 ${patient_name || 'غير محدد'}`,
-      `📋 ${reason || 'غير محدد'}`,
+      `تم تثبيت موعدك بنجاح! ✅`,
       `📅 ${formatArabicDay(scheduledAt)}`,
-      ``,
-      `صح؟`
-    ].join('\n');
+      `🎫 رقمك بالدور: ${queueNumber}`,
+      estimatedLine || null,
+      workHoursLine || null,
+      `👤 ${patient_name || ''}`,
+      `📝 ${reason || ''}`,
+      `رقم الحجز: #${ref}`,
+      `راجع العيادة بهذا اليوم وبيكون دورك حسب رقمك.`
+    ].filter(Boolean).join('\n');
 
     return {
       success: true,

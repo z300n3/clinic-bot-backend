@@ -77,62 +77,7 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
   const isYes = /^(نعم|اي|إي|صح|اكيد|أكيد|تمام|زين|موافق|ي|yep|yes|ok)[.!?]*$/i.test(trimmedMsg);
   const isNo = /^(لا|كلا|خطأ|غلط|مو صح|غير|بدل|no|nope|cancel)[.!?]*$/i.test(trimmedMsg);
 
-  // Fix 1: Booking Confirmation
-  if (subState === 'awaiting_confirmation') {
-    if (isYes) {
-      const { pending_booking } = stateData;
-      if (pending_booking) {
-        const { data: appt, error } = await supabase
-          .from('appointments')
-          .insert({
-            clinic_id: clinic.id,
-            patient_id: patient.id,
-            scheduled_at: pending_booking.scheduled_at,
-            duration_minutes: pending_booking.duration_minutes,
-            queue_number: pending_booking.queue_number,
-            status: 'scheduled',
-            reason: pending_booking.reason,
-            patient_name: pending_booking.patient_name
-          })
-          .select('id')
-          .single();
-          
-        if (!error) {
-          await upsertConversationState(clinic.id, patientPhone, 'active', { booking_substate: 'idle' });
-          const ref = appt.id.slice(-6).toUpperCase();
-          const scheduledAt = dayjs(pending_booking.scheduled_at).tz(TIMEZONE);
-          
-          const days = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
-          const months = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
-          const dateStr = `${days[scheduledAt.day()]} ${scheduledAt.date()} ${months[scheduledAt.month()]} ${scheduledAt.year()}`;
-          
-          const reply = [
-            `تم تثبيت موعدك بنجاح! ✅\n`,
-            `📅 ${dateStr}`,
-            `🎫 رقمك بالدور: ${pending_booking.queue_number}`,
-            pending_booking.estimatedLine || null,
-            pending_booking.workHoursLine || null,
-            `👤 ${pending_booking.patient_name || ''}`,
-            `📝 ${pending_booking.reason || ''}\n`,
-            `رقم الحجز: #${ref}\n`,
-            `راجع العيادة بهذا اليوم وبيكون دورك حسب رقمك.`
-          ].filter(Boolean).join('\n');
-          
-          await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
-          return reply;
-        }
-      }
-    } else if (isNo) {
-      await upsertConversationState(clinic.id, patientPhone, 'active', { booking_substate: 'idle' });
-      const reply = "تم الإلغاء. تفضل، متى تحب تحجز بدلاً منه؟";
-      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
-      return reply;
-    } else {
-      const reply = "الرجاء تأكيد الحجز بالإجابة بـ (نعم) أو الإلغاء بـ (لا).";
-      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
-      return reply;
-    }
-  }
+
 
   // Fix 2: Cancel Confirmation
   if (subState === 'awaiting_cancel_confirm') {
