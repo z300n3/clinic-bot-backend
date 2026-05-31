@@ -78,4 +78,9 @@ app.use((err, _req, res, _next) => {
 const PORT = parseInt(process.env.PORT || '3000', 10);
 app.listen(PORT, () => {
   logger.info(`Clinic Bot backend running on port ${PORT}`);
+  
+  // Fix 4 - Reminders cron job
+  const { sendReminders } = require('./jobs/reminders');
+  setInterval(sendReminders, 60 * 60 * 1000); // every hour
+  sendReminders(); // run once on startup
 });

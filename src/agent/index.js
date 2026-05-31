@@ -5,13 +5,15 @@ const timezone = require('dayjs/plugin/timezone');
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
-const { toolDefinitions, executeTool, checkFaqDirect } = require('./tools');
-const { saveMessage, loadConversationHistory, supabase } = require('../services/supabase');
+const { toolDefinitions, executeTool, searchFAQ } = require('./tools');
+const { saveMessage, loadConversationHistory, supabase, upsertConversationState } = require('../services/supabase');
+const dayjs = require('dayjs');
+const TIMEZONE = 'Asia/Baghdad';
 const logger = require('../utils/logger');
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const client = new OpenAI({ apiKey: process.env.OPENAI_APIDEEP_KEY,baseURL:"https://api.deepseek.com" });
 
-const MODEL           = 'gpt-4o-mini';
+const MODEL           = 'deepseek-v4-flash';
 const MAX_TOKENS      = 1024;
 const MAX_TOOL_ROUNDS = 5;
 const TIMEZONE        = 'Asia/Baghdad';
@@ -52,11 +54,118 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
     }
   }
 
-  // 4. FAQ Check
-  const faqRes = await checkFaqDirect(trimmedMsg, clinic.id);
-  if (faqRes.found && faqRes.answer) {
-    await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: faqRes.answer });
-    return faqRes.answer;
+  const isYes = /^(نعم|اي|إي|صح|اكيد|أكيد|تمام|زين|موافق|ي|yep|yes|ok)[.!?]*$/i.test(trimmedMsg);
+  const isNo = /^(لا|كلا|خطأ|غلط|مو صح|غير|بدل|no|nope|cancel)[.!?]*$/i.test(trimmedMsg);
+
+  // Fix 1: Booking Confirmation
+  if (subState === 'awaiting_confirmation') {
+    if (isYes) {
+      const { pending_booking } = stateData;
+      if (pending_booking) {
+        const { data: appt, error } = await supabase
+          .from('appointments')
+          .insert({
+            clinic_id: clinic.id,
+            patient_id: patient.id,
+            scheduled_at: pending_booking.scheduled_at,
+            duration_minutes: pending_booking.duration_minutes,
+            queue_number: pending_booking.queue_number,
+            status: 'scheduled',
+            reason: pending_booking.reason,
+            patient_name: pending_booking.patient_name
+          })
+          .select('id')
+          .single();
+          
+        if (!error) {
+          await upsertConversationState(clinic.id, patientPhone, 'active', { booking_substate: 'idle' });
+          const ref = appt.id.slice(-6).toUpperCase();
+          const scheduledAt = dayjs(pending_booking.scheduled_at).tz(TIMEZONE);
+          
+          const days = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+          const months = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+          const dateStr = `${days[scheduledAt.day()]} ${scheduledAt.date()} ${months[scheduledAt.month()]} ${scheduledAt.year()}`;
+          
+          const reply = [
+            `تم تثبيت موعدك بنجاح! ✅\n`,
+            `📅 ${dateStr}`,
+            `🎫 رقمك بالدور: ${pending_booking.queue_number}`,
+            pending_booking.estimatedLine || null,
+            pending_booking.workHoursLine || null,
+            `👤 ${pending_booking.patient_name || ''}`,
+            `📝 ${pending_booking.reason || ''}\n`,
+            `رقم الحجز: #${ref}\n`,
+            `راجع العيادة بهذا اليوم وبيكون دورك حسب رقمك.`
+          ].filter(Boolean).join('\n');
+          
+          await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+          return reply;
+        }
+      }
+    } else if (isNo) {
+      await upsertConversationState(clinic.id, patientPhone, 'active', { booking_substate: 'idle' });
+      const reply = "تم الإلغاء. تفضل، متى تحب تحجز بدلاً منه؟";
+      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+      return reply;
+    } else {
+      const reply = "الرجاء تأكيد الحجز بالإجابة بـ (نعم) أو الإلغاء بـ (لا).";
+      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+      return reply;
+    }
+  }
+
+  // Fix 2: Cancel Confirmation
+  if (subState === 'awaiting_cancel_confirm') {
+    if (isYes) {
+      const { pending_cancel_id } = stateData;
+      if (pending_cancel_id) {
+        await supabase.from('appointments').update({ status: 'cancelled', cancelled_at: new Date().toISOString() }).eq('id', pending_cancel_id);
+      }
+      await upsertConversationState(clinic.id, patientPhone, 'active', { booking_substate: 'idle' });
+      const reply = "تم إلغاء موعدك ✅\nلو تريد تحجز موعد جديد، أنا هنا! 😊";
+      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+      return reply;
+    } else if (isNo) {
+      await upsertConversationState(clinic.id, patientPhone, 'active', { booking_substate: 'idle' });
+      const reply = "تمام، موعدك محجوز كما هو 👍";
+      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+      return reply;
+    } else {
+      const reply = "هل أنت متأكد من إلغاء الموعد؟ (نعم / لا)";
+      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+      return reply;
+    }
+  }
+
+  // Fix 3: Rebook Confirmation
+  if (subState === 'awaiting_rebook_confirm') {
+    if (isYes) {
+      const { existing_appt_id } = stateData;
+      if (existing_appt_id) {
+        await supabase.from('appointments').update({ status: 'cancelled', cancelled_at: new Date().toISOString() }).eq('id', existing_appt_id);
+      }
+      await upsertConversationState(clinic.id, patientPhone, 'active', { booking_substate: 'idle' });
+      const reply = "تم إلغاء الموعد السابق. تفضل، أي يوم يناسبك للحجز الجديد؟";
+      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+      return reply;
+    } else if (isNo) {
+      await upsertConversationState(clinic.id, patientPhone, 'active', { booking_substate: 'idle' });
+      const reply = "تمام، موعدك محجوز كما هو 👍";
+      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+      return reply;
+    } else {
+      const reply = "تريد تلغي الموعد السابق وتحجز غيره؟ (نعم / لا)";
+      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+      return reply;
+    }
+  }
+
+  // 4. FAQ Check (0 tokens)
+  const faqMatch = await searchFAQ(clinic.id, trimmedMsg);
+  if (faqMatch.found) {
+    const reply = faqMatch.answer;
+    await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+    return reply;
   }
 
   // Load history + live schedule + upcoming blocks + conversation state in parallel
@@ -127,11 +236,41 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
 
       for (const toolCall of toolCalls) {
         const name  = toolCall.function.name;
-        const input = JSON.parse(toolCall.function.arguments);
+        const args = JSON.parse(toolCall.function.arguments);
 
-        logger.info('Tool call', { name, input });
+        logger.info('Tool call', { name, args });
 
-        const result = await executeTool(name, input, {
+        // Fix 3: Intercept booking flows to check for existing appointment
+        if ((name === 'check_availability' || name === 'book_appointment') && subState === 'idle') {
+          const { data: existing } = await supabase
+            .from('appointments')
+            .select('id, scheduled_at, patient_name')
+            .eq('clinic_id', clinic.id)
+            .eq('patient_id', patient.id)
+            .in('status', ['scheduled', 'confirmed'])
+            .gte('scheduled_at', new Date().toISOString())
+            .lte('scheduled_at', dayjs().add(7, 'day').toISOString())
+            .order('scheduled_at', { ascending: true })
+            .limit(1)
+            .maybeSingle();
+
+          if (existing) {
+            await upsertConversationState(clinic.id, patientPhone, 'active', {
+              booking_substate: 'awaiting_rebook_confirm',
+              existing_appt_id: existing.id
+            });
+            
+            const eDate = dayjs(existing.scheduled_at).tz(TIMEZONE);
+            const days = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+            const dateStr = `${days[eDate.day()]} ${eDate.format('YYYY/MM/DD')}`;
+            
+            const reply = `عندك موعد محجوز يوم ${dateStr} 📅\nتريد تلغيه وتحجز غيره؟ (نعم / لا)`;
+            await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+            return reply;
+          }
+        }
+
+        const result = await executeTool(name, args, {
           clinic,
           patient,
           patientPhone,

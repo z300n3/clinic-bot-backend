@@ -108,16 +108,7 @@ async function processReminder(appt) {
   }
 
   const timeFormatted = formatAppointmentTime(appt.scheduled_at);
-  const nameNote      = appt.patient_name ? `👤 ${appt.patient_name}\n` : '';
-  const reasonNote    = appt.reason       ? `📋 ${appt.reason}\n`       : '';
-
-  const message =
-    `تذكير بموعدك غداً 🔔\n\n` +
-    `📅 ${timeFormatted}\n` +
-    `${nameNote}` +
-    `${reasonNote}` +
-    `📍 ${clinic.address}\n\n` +
-    `إذا تريد إلغاء الموعد كلمنا. نتطلع لزيارتك 😊`;
+  const message = `تذكير بموعدك 🔔\n📅 ${timeFormatted}\n👤 ${appt.patient_name || 'غير محدد'}\n📍 ${clinic.address}\n\nإذا تريد إلغاء الموعد كلمنا.`;
 
   await sendWhatsAppReminder(
     clinic.whatsapp_phone_number_id,

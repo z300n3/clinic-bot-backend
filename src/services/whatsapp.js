@@ -6,8 +6,8 @@ const logger = require('../utils/logger');
 const GRAPH_API_VERSION = 'v22.0';
 const BASE_URL = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
 
-function authHeader() {
-  return { Authorization: `Bearer ${process.env.META_ACCESS_TOKEN}` };
+function authHeader(metaAccessToken) {
+  return { Authorization: `Bearer ${metaAccessToken || process.env.META_ACCESS_TOKEN}` };
 }
 
 /**
@@ -15,8 +15,9 @@ function authHeader() {
  * @param {string} phoneNumberId  — Meta phone-number ID (from your app config)
  * @param {string} to             — recipient WhatsApp number (E.164, e.g. "9647901234567")
  * @param {string} text           — message body
+ * @param {string} [metaAccessToken] — optional clinic-specific meta access token
  */
-async function sendWhatsAppMessage(phoneNumberId, to, text) {
+async function sendWhatsAppMessage(phoneNumberId, to, text, metaAccessToken) {
   try {
     const response = await axios.post(
       `${BASE_URL}/${phoneNumberId}/messages`,
@@ -27,7 +28,7 @@ async function sendWhatsAppMessage(phoneNumberId, to, text) {
         type: 'text',
         text: { body: text, preview_url: false },
       },
-      { headers: { ...authHeader(), 'Content-Type': 'application/json' } }
+      { headers: { ...authHeader(metaAccessToken), 'Content-Type': 'application/json' } }
     );
 
     logger.info('WhatsApp message sent', {

@@ -4,7 +4,7 @@ const timezone = require('dayjs/plugin/timezone');
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
-const { supabase } = require('../services/supabase');
+const { supabase, upsertConversationState } = require('../services/supabase');
 const logger = require('../utils/logger');
 
 const TIMEZONE     = 'Asia/Baghdad';
@@ -226,7 +226,7 @@ async function bookAppointment({ patient_name, appointment_date, reason }, { cli
 
       supabase
         .from('appointments')
-        .select('id')
+        .select('id, patient_id')
         .eq('clinic_id', clinic.id)
         .in('status', ['scheduled', 'confirmed'])
         .gte('scheduled_at', dayStartISO)
@@ -235,7 +235,14 @@ async function bookAppointment({ patient_name, appointment_date, reason }, { cli
 
     const schedules = schedulesRes.data || [];
     const blocks    = blocksRes.data    || [];
-    const booked    = (bookedRes.data || []).length;
+    const bookedAppts = bookedRes.data || [];
+    const booked    = bookedAppts.length;
+
+    // Fix 5: Prevent duplicate bookings from same patient
+    const sameDayAppt = bookedAppts.find(a => String(a.patient_id) === String(patient.id));
+    if (sameDayAppt) {
+      return { success: false, error: 'عندك موعد محجوز بنفس اليوم. لا يمكن حجز موعدين بنفس اليوم.' };
+    }
 
     const { isWorking, capacity, shifts } = getDayConfig(targetDay, schedules, clinic.working_hours || {});
 
@@ -287,45 +294,35 @@ async function bookAppointment({ patient_name, appointment_date, reason }, { cli
       workHoursLine  = `🕐 دوام العيادة: ${openFmt}${closeFmt}`;
     }
 
-    const { data: appt, error } = await supabase
-      .from('appointments')
-      .insert({
-        clinic_id:        clinic.id,
-        patient_id:       patient.id,
-        scheduled_at:     scheduledAt.toISOString(),
-        duration_minutes: clinic.appointment_duration_minutes || 30,
-        queue_number:     queueNumber,
-        status:           'scheduled',
-        reason,
-        patient_name:     patient_name || null,   // name as spoken in this conversation
-      })
-      .select('id')
-      .single();
+    // Fix 1: Add confirmation before booking
+    const pendingBooking = {
+      patient_name: patient_name || null,
+      scheduled_at: scheduledAt.toISOString(),
+      duration_minutes: clinic.appointment_duration_minutes || 30,
+      queue_number: queueNumber,
+      reason,
+      estimatedLine,
+      workHoursLine
+    };
 
-    if (error) return { success: false, error: 'فشل الحجز: ' + error.message };
-
-    const ref = appt.id.slice(-6).toUpperCase();
+    // context.patientPhone is passed in executeTool
+    await upsertConversationState(clinic.id, patient.phone_number, 'active', {
+      booking_substate: 'awaiting_confirmation',
+      pending_booking: pendingBooking
+    });
 
     const lines = [
-      `تم تثبيت موعدك بنجاح! ✅`,
-      ``,
+      `تأكيد الحجز:`,
+      `👤 ${patient_name || 'غير محدد'}`,
+      `📋 ${reason || 'غير محدد'}`,
       `📅 ${formatArabicDay(scheduledAt)}`,
-      `🎫 رقمك بالدور: ${queueNumber}`,
-      estimatedLine  || null,
-      workHoursLine  || null,
-      `👤 ${patient_name}`,
-      `📝 ${reason}`,
       ``,
-      `رقم الحجز: #${ref}`,
-      ``,
-      `راجع العيادة بهذا اليوم وبيكون دورك حسب رقمك.${estimatedLine ? ' الوقت التقريبي المذكور أعلاه هو تخمين فقط.' : ''} لو تحتاج تلغي أو تغيّر، كلمنا!`,
-    ].filter((l) => l !== null).join('\n');
+      `صح؟`
+    ].join('\n');
 
     return {
-      success:        true,
-      appointment_id: appt.id,
-      queue_number:   queueNumber,
-      message:        lines,
+      success: true,
+      message: lines
     };
   } catch (err) {
     logger.error('bookAppointment error', { error: err.message });
@@ -447,17 +444,16 @@ async function cancelAppointment({ patient_phone }, { clinic }) {
       return { success: false, message: 'ما عندك مواعيد قادمة محجوزة.' };
     }
 
-    const { error } = await supabase
-      .from('appointments')
-      .update({ status: 'cancelled', cancelled_at: new Date().toISOString() })
-      .eq('id', appt.id);
-
-    if (error) return { success: false, error: 'فشل الإلغاء: ' + error.message };
+    // Fix 2: Add confirmation before cancellation
+    await upsertConversationState(clinic.id, patient_phone, 'active', {
+      booking_substate: 'awaiting_cancel_confirm',
+      pending_cancel_id: appt.id
+    });
 
     const slotDate = dayjs(appt.scheduled_at).tz(TIMEZONE);
     return {
       success: true,
-      message: `تم إلغاء موعدك ✅\n\nالموعد الملغي: ${formatArabicDay(slotDate)}\n\nلو تريد تحجز موعد جديد، أنا هنا! 😊`,
+      message: `موعدك يوم ${formatArabicDay(slotDate)}\nمتأكد من الإلغاء؟`
     };
   } catch (err) {
     logger.error('cancelAppointment error', { error: err.message });
@@ -465,36 +461,64 @@ async function cancelAppointment({ patient_phone }, { clinic }) {
   }
 }
 
-// ── get_faq_answer ────────────────────────────────────────────────────────────
-
-async function checkFaqDirect(question, clinicId) {
+async function searchFAQ(clinicId, message) {
   try {
-    const words = extractKeywords(question);
-    if (words.length === 0) return { found: false, answer: null };
-
-    // Build OR filter: match any keyword against question or answer text
-    const orParts = words
-      .flatMap((w) => [`question.ilike.%${w}%`, `answer.ilike.%${w}%`])
-      .join(',');
-
-    const { data: results } = await supabase
+    const { data: faqs } = await supabase
       .from('faqs')
-      .select('question, answer')
+      .select('question, answer, keywords')
       .eq('clinic_id', clinicId)
-      .eq('is_active', true)
-      .or(orParts)
-      .limit(1);
+      .eq('is_active', true);
 
-    if (results && results.length > 0) {
-      return {
-        found:   true,
-        answer:  results[0].answer,
+    if (!faqs || faqs.length === 0) return { found: false, answer: null };
+
+    const msg = message.replace(/[؟?!،,.]/g, '').trim();
+
+    const scored = faqs.map(faq => {
+      let score = 0;
+      const keywords = faq.keywords || [];
+
+      // Direct keyword match
+      for (const kw of keywords) {
+        if (msg.includes(kw)) score += 3;
+      }
+
+      // Word-level partial match
+      const words = msg.split(' ').filter(w => w.length > 2);
+      for (const word of words) {
+        for (const kw of keywords) {
+          if (kw.includes(word) || word.includes(kw)) score += 1;
+        }
+      }
+
+      // Common pattern matching
+      const patterns = {
+        location:  ['وين','فين','موقع','عنوان','مكان','كيف اوصل','خارطة'],
+        hours:     ['دوام','ساعات','تفتح','تسكر','متى','يمته','وقت'],
+        price:     ['سعر','كلفة','كم','فلوس','دينار','اجور','اسعار'],
+        specialty: ['تخصص','اختصاص','شنو تعالج','تعالجون','خدمات']
       };
-    }
 
+      for (const [category, categoryWords] of Object.entries(patterns)) {
+        if (categoryWords.some(w => msg.includes(w))) {
+          for (const kw of keywords) {
+            if (kw.includes(category) || 
+                categoryWords.some(w => kw.includes(w))) {
+              score += 2;
+            }
+          }
+        }
+      }
+
+      return { ...faq, score };
+    });
+
+    const best = scored.sort((a, b) => b.score - a.score)[0];
+    if (best && best.score >= 2) {
+      return { found: true, answer: best.answer };
+    }
     return { found: false, answer: null };
   } catch (err) {
-    logger.error('checkFaqDirect error', { error: err.message });
+    logger.error('searchFAQ error', { error: err.message });
     return { found: false, error: 'خطأ في البحث: ' + err.message };
   }
 }
@@ -594,4 +618,4 @@ function extractKeywords(text) {
     .slice(0, 5);
 }
 
-module.exports = { toolDefinitions, executeTool, checkFaqDirect };
+module.exports = { toolDefinitions, executeTool, searchFAQ };
