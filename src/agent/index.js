@@ -140,8 +140,15 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
     logger.debug('OpenAI response', { finishReason: choice.finish_reason, round });
 
     // ── Final answer ──────────────────────────────────────────────────────────
-    if (choice.finish_reason === 'stop') {
+    if (choice.finish_reason === 'stop' || !choice.message.tool_calls) {
       const text = choice.message.content?.trim() || 'عذراً، ما قدرت أفهم. حاول مرة ثانية.';
+
+      // Text-based tool trigger (Bypass broken tool calls for deepseek)
+      if (text.includes('CHECK_APPT')) {
+        const result = await executeTool('check_my_appointment', {}, { clinic, patient, patientPhone });
+        await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: result.message });
+        return result.message;
+      }
 
       await saveMessage({
         clinicId:     clinic.id,
@@ -388,7 +395,7 @@ ${priceInstruction}
 
 **سلوكك مع المريض:**
 - حاول تساعد المريض دائماً قبل ما ترفض أي طلب.
-- إذا سأل "شوكت موعدي" أو "هل انا حاجز" أو "شنو رقمي" → استخدم أداة check_my_appointment لمعرفة تفاصيل حجزه بدون إلغائه.
+- إذا سأل المريض عن موعده أو حجزه الحالي أو رقمه بالدور (مثل: "شوكت موعدي"، "هل انا حاجز"، "رقمي شكد") → ممنوع الرد بأي جملة! اكتب فقط هذه الكلمة باللغة الإنجليزية: CHECK_APPT
 - لإلغاء الموعد استخدم أداة cancel_appointment، لكن تأكد من رغبة المريض بالإلغاء أولاً.
 - إذا سأل عن السعر/الكشفية/الباص/ابيش بأي صياغة → أجبه بسعر الكشفية: ${priceText}.
 - إذا ذكر المريض اسم طبيب يختلف عن اسم دكتور العيادة (${clinic.doctor_name})، أبلغه بلطف أنه ربما أخطأ في الرقم وأن هذه عيادة الدكتور ${clinic.doctor_name}. لا تستخدم أداة out_of_scope_response في هذه الحالة.
