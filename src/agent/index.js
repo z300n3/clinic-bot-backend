@@ -205,6 +205,13 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
           }
         }
 
+        // Check my appointment Interceptor
+        if (name === 'check_my_appointment') {
+          const result = await executeTool(name, {}, { clinic, patient, patientPhone });
+          await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: result.message });
+          return result.message;
+        }
+
         // Out of Scope Interceptor
         if (name === 'out_of_scope_response') {
           const reply = 'عذراً، عملي كسكرتير آلي يقتصر على حجز المواعيد والإجابة على الاستفسارات الخاصة بالعيادة فقط.';
