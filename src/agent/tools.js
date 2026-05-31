@@ -50,13 +50,20 @@ const toolDefinitions = [
   },
   {
     name: 'cancel_appointment',
-    description: 'يلغي الموعد القادم',
+    description: 'يلغي الموعد القادم للمريض. لا تستخدمها إلا إذا أكد المريض رغبته في الإلغاء صراحة.',
     input_schema: {
       type: 'object',
-      properties: {
-        patient_phone: { type: 'string', description: 'رقم هاتف المريض' },
-      },
-      required: ['patient_phone'],
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: 'check_my_appointment',
+    description: 'يبحث عن موعد المريض القادم ويعرض تفاصيله (الوقت، الرقم بالدور، التاريخ). استخدمها عندما يسأل المريض عن موعده.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+      required: [],
     },
   },
   {
@@ -98,6 +105,7 @@ async function executeTool(name, input, context) {
     case 'book_appointment':    return bookAppointment(input, context);
     case 'get_day_bookings':    return getDayBookings(input, context);
     case 'cancel_appointment':  return cancelAppointment(input, context);
+    case 'check_my_appointment': return checkMyAppointment(input, context);
     case 'escalate_to_human':   return escalateToHuman(input, context);
     default:
       return { error: `أداة غير معروفة: ${name}` };
@@ -445,13 +453,13 @@ function isDayBlocked(dayObj, blocks) {
 
 // ── cancel_appointment ────────────────────────────────────────────────────────
 
-async function cancelAppointment({ patient_phone }, { clinic }) {
+async function cancelAppointment(input, { clinic, patientPhone }) {
   try {
     const { data: pat } = await supabase
       .from('patients')
       .select('id')
       .eq('clinic_id', clinic.id)
-      .eq('phone_number', patient_phone)
+      .eq('phone_number', patientPhone)
       .maybeSingle();
 
     if (!pat) return { success: false, message: 'ما وجدنا بيانات لهذا الرقم.' };
@@ -471,20 +479,54 @@ async function cancelAppointment({ patient_phone }, { clinic }) {
       return { success: false, message: 'ما عندك مواعيد قادمة محجوزة.' };
     }
 
-    // Fix 2: Add confirmation before cancellation
-    await upsertConversationState(clinic.id, patient_phone, 'active', {
-      booking_substate: 'awaiting_cancel_confirm',
-      pending_cancel_id: appt.id
-    });
+    await supabase.from('appointments').update({ status: 'cancelled', cancelled_at: new Date().toISOString() }).eq('id', appt.id);
 
-    const slotDate = dayjs(appt.scheduled_at).tz(TIMEZONE);
     return {
       success: true,
-      message: `موعدك يوم ${formatArabicDay(slotDate)}\nمتأكد من الإلغاء؟`
+      message: `تم إلغاء الموعد بنجاح ✅`
     };
   } catch (err) {
     logger.error('cancelAppointment error', { error: err.message });
     return { success: false, error: 'خطأ في الإلغاء: ' + err.message };
+  }
+}
+
+// ── check_my_appointment ──────────────────────────────────────────────────────
+
+async function checkMyAppointment(input, { clinic, patientPhone }) {
+  try {
+    const { data: pat } = await supabase
+      .from('patients')
+      .select('id')
+      .eq('clinic_id', clinic.id)
+      .eq('phone_number', patientPhone)
+      .maybeSingle();
+
+    if (!pat) return { success: false, message: 'ما عندك أي موعد مسجل حالياً.' };
+
+    const { data: appt } = await supabase
+      .from('appointments')
+      .select('id, scheduled_at, queue_number, reason')
+      .eq('clinic_id', clinic.id)
+      .eq('patient_id', pat.id)
+      .in('status', ['scheduled', 'confirmed'])
+      .gte('scheduled_at', new Date().toISOString())
+      .order('scheduled_at', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (!appt) {
+      return { success: false, message: 'ما عندك أي موعد قادم مسجل.' };
+    }
+
+    const slotDate = dayjs(appt.scheduled_at).tz(TIMEZONE);
+    return {
+      success: true,
+      message: `عندك موعد مسجل يوم ${formatArabicDay(slotDate)} 📅\n🎫 رقمك بالدور هو: ${appt.queue_number}`
+    };
+  } catch (err) {
+    logger.error('checkMyAppointment error', { error: err.message });
+    return { success: false, error: 'خطأ في البحث عن الموعد: ' + err.message };
   }
 }
 

@@ -79,28 +79,7 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
 
 
 
-  // Fix 2: Cancel Confirmation
-  if (subState === 'awaiting_cancel_confirm') {
-    if (isYes) {
-      const { pending_cancel_id } = stateData;
-      if (pending_cancel_id) {
-        await supabase.from('appointments').update({ status: 'cancelled', cancelled_at: new Date().toISOString() }).eq('id', pending_cancel_id);
-      }
-      await upsertConversationState(clinic.id, patientPhone, 'active', { booking_substate: 'idle' });
-      const reply = "تم إلغاء موعدك ✅\nلو تريد تحجز موعد جديد، أنا هنا! 😊";
-      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
-      return reply;
-    } else if (isNo) {
-      await upsertConversationState(clinic.id, patientPhone, 'active', { booking_substate: 'idle' });
-      const reply = "تمام، موعدك محجوز كما هو 👍";
-      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
-      return reply;
-    } else {
-      const reply = "هل أنت متأكد من إلغاء الموعد؟ (نعم / لا)";
-      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
-      return reply;
-    }
-  }
+
 
   // Fix 3: Rebook Confirmation
   if (subState === 'awaiting_rebook_confirm') {
@@ -402,8 +381,10 @@ ${priceInstruction}
 
 **سلوكك مع المريض:**
 - حاول تساعد المريض دائماً قبل ما ترفض أي طلب.
-- إذا سأل "شوكت موعدي" أو "هل انا حاجز" أو "رقمي" → استخدم أداة cancel_appointment للبحث عن موعده (بدون ما تلغيه)، وأخبره بالمعلومات.
+- إذا سأل "شوكت موعدي" أو "هل انا حاجز" أو "شنو رقمي" → استخدم أداة check_my_appointment لمعرفة تفاصيل حجزه بدون إلغائه.
+- لإلغاء الموعد استخدم أداة cancel_appointment، لكن تأكد من رغبة المريض بالإلغاء أولاً.
 - إذا سأل عن السعر/الكشفية/الباص/ابيش بأي صياغة → أجبه بسعر الكشفية: ${priceText}.
+- إذا ذكر المريض اسم طبيب يختلف عن اسم دكتور العيادة (${clinic.doctor_name})، أبلغه بلطف أنه ربما أخطأ في الرقم وأن هذه عيادة الدكتور ${clinic.doctor_name}. لا تستخدم أداة out_of_scope_response في هذه الحالة.
 - إذا كانت رسالة المريض عبارة عن استفسار أو طلب خارج نطاق مهامك كسكرتير للعيادة أو لا علاقة له بالحجوزات والمواعيد → استخدم أداة out_of_scope_response فوراً لتوجيه رسالة ثابتة للمريض.
 - إذا ما فهمت الرسالة → اسأل المريض يوضح شنو يريد، لا ترفض مباشرة.
 - إذا طلب شيء فعلاً يخص العيادة لكنه خارج قدرتك → وجّهه بلطف للاتصال بالعيادة مباشرة.`;
