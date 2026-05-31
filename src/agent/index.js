@@ -7,8 +7,6 @@ dayjs.extend(timezone);
 
 const { toolDefinitions, executeTool, searchFAQ } = require('./tools');
 const { saveMessage, loadConversationHistory, supabase, upsertConversationState } = require('../services/supabase');
-const dayjs = require('dayjs');
-const TIMEZONE = 'Asia/Baghdad';
 const logger = require('../utils/logger');
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_APIDEEP_KEY,baseURL:"https://api.deepseek.com" });
@@ -53,6 +51,17 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
       return reply;
     }
   }
+
+  // Load history + live schedule + upcoming blocks + conversation state in parallel
+  const [history, weeklySchedule, upcomingBlocks, stateRes] = await Promise.all([
+    loadConversationHistory(clinic.id, patientPhone, 10),
+    loadWeeklySchedule(clinic.id, clinic.working_hours),
+    loadUpcomingBlocks(clinic.id),
+    supabase.from('conversation_state').select('state_data').eq('clinic_id', clinic.id).eq('patient_phone', patientPhone).maybeSingle(),
+  ]);
+
+  const stateData = stateRes.data?.state_data || {};
+  const subState  = stateData.booking_substate || 'idle';
 
   const isYes = /^(نعم|اي|إي|صح|اكيد|أكيد|تمام|زين|موافق|ي|yep|yes|ok)[.!?]*$/i.test(trimmedMsg);
   const isNo = /^(لا|كلا|خطأ|غلط|مو صح|غير|بدل|no|nope|cancel)[.!?]*$/i.test(trimmedMsg);
@@ -168,16 +177,7 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
     return reply;
   }
 
-  // Load history + live schedule + upcoming blocks + conversation state in parallel
-  const [history, weeklySchedule, upcomingBlocks, stateRes] = await Promise.all([
-    loadConversationHistory(clinic.id, patientPhone, 10),
-    loadWeeklySchedule(clinic.id, clinic.working_hours),
-    loadUpcomingBlocks(clinic.id),
-    supabase.from('conversation_state').select('state_data').eq('clinic_id', clinic.id).eq('patient_phone', patientPhone).maybeSingle(),
-  ]);
-
-  const stateData = stateRes.data?.state_data || {};
-  const subState  = stateData.booking_substate || 'idle';
+  // History and state already loaded above
 
   const messages = buildMessages(history, userMessage);
   const system   = buildSystemPrompt(clinic, weeklySchedule, upcomingBlocks);
