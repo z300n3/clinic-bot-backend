@@ -316,6 +316,14 @@ async function bookAppointment({ patient_name, appointment_date, reason }, { cli
       workHoursLine  = `🕐 دوام العيادة: ${openFmt}${closeFmt}`;
     }
 
+    console.log('[BOOKING ATTEMPT]', {
+      patientName: patient_name,
+      reason: reason,
+      scheduledAt: scheduledAt.toISOString(),
+      patientId: patient.id,
+      clinicId: clinic.id
+    });
+
     // Direct Booking Insertion (Confirmation Step Removed)
     const { data: appt, error } = await supabase
       .from('appointments')
