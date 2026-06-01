@@ -241,7 +241,7 @@ async function bookAppointment({ patient_name, appointment_date, reason }, { cli
 
       supabase
         .from('blocked_periods')
-        .select('start_at, end_at, is_full_day')
+        .select('start_at, end_at, is_full_day, substitute_doctor_name, substitute_doctor_note')
         .eq('clinic_id', clinic.id)
         .lt('start_at', dayEndISO)
         .gt('end_at',   dayStartISO),
@@ -271,8 +271,28 @@ async function bookAppointment({ patient_name, appointment_date, reason }, { cli
     if (!isWorking) {
       return { success: false, error: `${formatArabicDay(targetDay)} ليس يوم دوام في العيادة.` };
     }
+    let servedBy = null; // null = main doctor
+    let substituteNotice = '';
+
     if (isDayBlocked(targetDay, blocks)) {
-      return { success: false, error: `${formatArabicDay(targetDay)} الدكتور غير متوفر (إجازة/غياب).` };
+      // Find the blocking period covering this day
+      const blockingPeriod = blocks.find(b => {
+        const blockStart = dayjs(b.start_at).tz(TIMEZONE).startOf('day');
+        const blockEnd = dayjs(b.end_at).tz(TIMEZONE).endOf('day');
+        return targetDay.isBetween(blockStart, blockEnd, null, '[]');
+      });
+
+      if (blockingPeriod?.substitute_doctor_name) {
+        // Substitute available — allow booking, same hours
+        servedBy = blockingPeriod.substitute_doctor_name;
+        substituteNotice = `⚠️ ملاحظة: ${clinic.doctor_name || 'الدكتور الأساسي'} غائب هذا اليوم. الطبيب البديل: ${blockingPeriod.substitute_doctor_name}`;
+      } else {
+        // No substitute — block as before
+        return { 
+          success: false, 
+          error: `${formatArabicDay(targetDay)} الدكتور غير متوفر (إجازة/غياب) ولا يوجد بديل.` 
+        };
+      }
     }
 
     const unlimited = capacity === null || capacity === undefined;
@@ -335,7 +355,8 @@ async function bookAppointment({ patient_name, appointment_date, reason }, { cli
         queue_number: queueNumber,
         status: 'scheduled',
         reason: reason,
-        patient_name: patient_name || null
+        patient_name: patient_name || null,
+        served_by: servedBy
       })
       .select('id')
       .single();
@@ -350,6 +371,7 @@ async function bookAppointment({ patient_name, appointment_date, reason }, { cli
     const lines = [
       `تم تثبيت موعدك بنجاح! ✅`,
       `📅 ${formatArabicDay(scheduledAt)}`,
+      substituteNotice || null,
       `🎫 رقمك بالدور: ${queueNumber}`,
       estimatedLine || null,
       workHoursLine || null,

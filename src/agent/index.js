@@ -328,7 +328,7 @@ async function loadUpcomingBlocks(clinicId) {
 
   const { data, error } = await supabase
     .from('blocked_periods')
-    .select('start_at, end_at, is_full_day, reason')
+    .select('start_at, end_at, is_full_day, reason, substitute_doctor_name, substitute_doctor_note')
     .eq('clinic_id', clinicId)
     .gt('end_at', now.startOf('day').toISOString())
     .lt('start_at', horizon.toISOString())
@@ -410,6 +410,7 @@ ${priceInstruction}
 - مسموح للمريض أن يحجز لنفسه أو لأي شخص آخر (مثل ابنه، زوجته، أو صديقه).
 - قبل الحجز، يجب أن تعرف: الاسم، اليوم، السبب.
 - لا تعطي نصائح طبية (لا تشخيص، لا وصف دواء).
+- إذا كان هناك طبيب بديل ليوم معين، الحجز متاح بنفس أوقات الدوام. أخبر المريض أن الدكتور الأساسي غائب وأن البديل سيكون موجوداً.
 - تحذير صارم جداً: إياك أن تقوم بتأكيد الحجز بكتابة رسالة تأكيد نصية عادية! لتأكيد الحجز، يجب عليك إما استدعاء الأداة book_appointment، أو كتابة الأمر التالي حصراً باللغة الإنجليزية:
 BOOK_APPT|اسم_المريض|تاريخ_الحجز|السبب
 مثال: BOOK_APPT|علي محمد|باجر|مراجعة
@@ -454,20 +455,20 @@ function formatBlocks(blocks) {
   if (!blocks || blocks.length === 0) return '  لا توجد أيام غياب مسجلة.';
 
   return blocks.map((b) => {
-    // using dayjs since b.start_at is UTC ISO string
     const startD = dayjs(b.start_at).tz(TIMEZONE);
     const endD = dayjs(b.end_at).tz(TIMEZONE);
     const reason = b.reason ? ` (${b.reason})` : '';
+    const sub = b.substitute_doctor_name 
+      ? ` — يوجد بديل: ${b.substitute_doctor_name} (نفس أوقات الدوام، الحجز متاح)`
+      : ' — لا يوجد بديل (الحجز مغلق هذا اليوم)';
 
     if (b.is_full_day) {
       const sameDay = startD.format('YYYY-MM-DD') === endD.format('YYYY-MM-DD');
-      const range   = sameDay
-        ? formatBlockDate(startD)
+      const range = sameDay ? formatBlockDate(startD)
         : `من ${formatBlockDate(startD)} إلى ${formatBlockDate(endD)}`;
-      return `  - ${range}: مغلق طوال اليوم${reason}`;
+      return `  - ${range}: غياب${reason}${sub}`;
     }
-
-    return `  - ${formatBlockDate(startD)} من ${formatTime12(startD.format('HH:mm'))} إلى ${formatTime12(endD.format('HH:mm'))}: مغلق${reason}`;
+    return `  - ${formatBlockDate(startD)} من ${formatTime12(startD.format('HH:mm'))} إلى ${formatTime12(endD.format('HH:mm'))}: غياب${reason}${sub}`;
   }).join('\n');
 }
 
