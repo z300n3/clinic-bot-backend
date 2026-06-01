@@ -223,6 +223,14 @@ async function checkAvailability({ date_preference }, { clinic }) {
 
 async function bookAppointment({ patient_name, appointment_date, reason }, { clinic, patient }) {
   try {
+    const nameParts = (patient_name || '').trim().split(/\s+/).filter(Boolean);
+    if (nameParts.length < 2) {
+      return { 
+        success: false, 
+        error: 'الاسم يجب أن يكون ثنائي على الأقل (اسم + اسم الأب أو العائلة).' 
+      };
+    }
+
     const now       = getBaghdadNow();
     const targetDay = parseArabicDatePreference(appointment_date, now).startOf('day');
 
