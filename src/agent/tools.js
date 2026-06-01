@@ -187,7 +187,7 @@ async function checkAvailability({ date_preference }, { clinic }) {
 
             days.push({
               date:          dateStr,
-              display:       formatArabicDay(day) + (block?.substitute_doctor_name ? ' (مع طبيب بديل)' : ''),
+              display:       formatArabicDay(day) + (block?.substitute_doctor_name ? ` (مع الطبيب البديل: ${block.substitute_doctor_name})` : ''),
               booked,
               capacity:      unlimited ? null : capacity,
               remaining:     unlimited ? null : capacity - booked,
