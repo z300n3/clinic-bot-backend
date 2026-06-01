@@ -56,7 +56,7 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
   }
 
   // 5. Dynamic Context Injection
-  const isBookingIntent = /(موعد|حجز|احجز|وقت|ساعة|متى|يوم|باجر|عگب|غدا|اليوم|ايام|داوم|مفتوحين|شوكت|متواجد|يمته|اجي)/i.test(trimmedMsg);
+  const isBookingIntent = /(موعد|حجز|احجز|وقت|ساعة|متى|يوم|باجر|عگب|غدا|اليوم|ايام|داوم|مفتوحين|شوكت|متواجد|يمته|اجي|جدول|دوام|اوقات|أوقات|ساعات)/i.test(trimmedMsg);
 
   // Load history + live schedule + upcoming blocks + conversation state in parallel
   const [history, weeklySchedule, upcomingBlocks, stateRes] = await Promise.all([
@@ -138,30 +138,6 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
     // ── Final answer ──────────────────────────────────────────────────────────
     if (choice.finish_reason === 'stop' || !choice.message.tool_calls) {
       const text = choice.message.content?.trim() || 'عذراً، ما قدرت أفهم. حاول مرة ثانية.';
-
-      // Text-based tool trigger (Bypass broken tool calls for deepseek)
-      if (text.includes('CHECK_APPT')) {
-        const result = await executeTool('check_my_appointment', {}, { clinic, patient, patientPhone });
-        await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: result.message });
-        return result.message;
-      }
-
-      if (text.includes('BOOK_APPT|')) {
-        try {
-          const parts = text.split('BOOK_APPT|')[1].split('|');
-          const pName = parts[0]?.trim();
-          const pDate = parts[1]?.trim();
-          const pReason = parts[2]?.trim();
-          
-          if (pName && pDate && pReason) {
-            const result = await executeTool('book_appointment', { patient_name: pName, appointment_date: pDate, reason: pReason }, { clinic, patient, patientPhone });
-            await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: result.message });
-            return result.message;
-          }
-        } catch (e) {
-          logger.error('Text-based BOOK_APPT parsing failed', { error: e.message });
-        }
-      }
 
       await saveMessage({
         clinicId:     clinic.id,
@@ -387,43 +363,45 @@ function buildSystemPrompt(clinic, weeklySchedule, upcomingBlocks) {
   const todayHours = getTodayHoursString(weeklySchedule);
   const currentTime = getCurrentTimeString();
 
-  const priceText = clinic.consultation_price ? `${clinic.consultation_price} دينار` : 'غير محدد';
-  const priceInstruction = clinic.consultation_price 
-    ? 'أجب المريض بالسعر المذكور أدناه مباشرة إذا سأل عنه.'
-    : 'إذا سألك المريض عن السعر، قل له فقط: "عذراً، ما عندي معلومة عن السعر حالياً، تگدر تتصل بالعيادة وتستفسر منهم." (ممنوع استخدام رسالة الرفض الطبية هنا).';
+  const priceText = clinic.consultation_price 
+    ? `${clinic.consultation_price} دينار` 
+    : 'يرجى الاتصال بالعيادة للاستفسار';
 
-  return `أنت مساعد عيادة "${clinic.name}" (${clinic.specialty}).
-تحدث باللهجة العراقية باختصار ودفء.
+  return `أنت مساعد عيادة "${clinic.name}" (${clinic.specialty}). تحدث باللهجة العراقية باختصار ودفء.
 
-الطبيب: ${clinic.doctor_name} | سعر الكشفية: ${priceText} | العنوان: ${clinic.address}
+الطبيب: ${clinic.doctor_name}
+سعر الكشفية: ${priceText}
+العنوان: ${clinic.address}
+
 دوام الأسبوع:
 ${formatSchedule(weeklySchedule)}
-إجازات قادمة:
+
+إجازات وأيام البديل:
 ${formatBlocks(upcomingBlocks)}
-تاريخ اليوم: ${formatBlockDate(today)} (${today.format('YYYY-MM-DD')})
-الوقت الحالي: ${currentTime} — دوام اليوم: ${todayHours} — ${isOpen ? 'مفتوح الآن ✅' : 'خارج وقت الدوام'}
 
-${priceInstruction}
+اليوم: ${formatBlockDate(today)} | الوقت: ${currentTime} | ${isOpen ? 'مفتوح الآن' : 'خارج وقت الدوام'}
 
-**قواعد الحجز:**
-- الحجز باليوم فقط (لا تسأل عن الساعة).
-- مسموح للمريض أن يحجز لنفسه أو لأي شخص آخر (مثل ابنه، زوجته، أو صديقه).
-- قبل الحجز، يجب أن تعرف: الاسم، اليوم، السبب.
-- لا تعطي نصائح طبية (لا تشخيص، لا وصف دواء).
-- تنبيه مهم: إذا كان هناك طبيب بديل مذكور في "إجازات قادمة" أعلاه، فالحجز متاح بذلك اليوم. لا تنكر وجود البديل أبداً. أخبر المريض أن الطبيب الأساسي غائب وأن البديل سيكون موجوداً بنفس الدوام.
-- تحذير صارم جداً: إياك أن تقوم بتأكيد الحجز بكتابة رسالة تأكيد نصية عادية! لتأكيد الحجز، يجب عليك إما استدعاء الأداة book_appointment، أو كتابة الأمر التالي حصراً باللغة الإنجليزية:
-BOOK_APPT|اسم_المريض|تاريخ_الحجز|السبب
-مثال: BOOK_APPT|علي محمد|باجر|مراجعة
+# مهامك (لا تخرج عنها)
+حجز موعد، إلغاء موعد، الاستعلام عن موعد، أوقات الدوام، العنوان، السعر.
+أي طلب آخر (نصيحة طبية، تشخيص، دواء، أو موضوع غير متعلق بالعيادة) → استخدم أداة out_of_scope_response.
 
-**سلوكك مع المريض:**
-- حاول تساعد المريض دائماً قبل ما ترفض أي طلب.
-- إذا سأل المريض عن موعده أو حجزه الحالي أو رقمه بالدور (مثل: "شوكت موعدي"، "هل انا حاجز"، "رقمي شكد") → ممنوع الرد بأي جملة! اكتب فقط هذه الكلمة باللغة الإنجليزية: CHECK_APPT
-- لإلغاء الموعد استخدم أداة cancel_appointment، لكن تأكد من رغبة المريض بالإلغاء أولاً.
-- إذا سأل عن السعر/الكشفية/الباص/ابيش بأي صياغة → أجبه بسعر الكشفية: ${priceText}.
-- إذا ذكر المريض اسم طبيب يختلف عن اسم دكتور العيادة (${clinic.doctor_name})، أبلغه بلطف أنه ربما أخطأ في الرقم وأن هذه عيادة الدكتور ${clinic.doctor_name}. لا تستخدم أداة out_of_scope_response في هذه الحالة.
-- إذا كانت رسالة المريض عبارة عن استفسار أو طلب خارج نطاق مهامك كسكرتير للعيادة أو لا علاقة له بالحجوزات والمواعيد → استخدم أداة out_of_scope_response فوراً لتوجيه رسالة ثابتة للمريض.
-- إذا ما فهمت الرسالة → اسأل المريض يوضح شنو يريد، لا ترفض مباشرة.
-- إذا طلب شيء فعلاً يخص العيادة لكنه خارج قدرتك → وجّهه بلطف للاتصال بالعيادة مباشرة.`;
+# قواعد الحجز
+- الحجز باليوم فقط (بدون ساعة).
+- يحتاج: اسم المريض + اليوم + سبب الزيارة. اسأل عن الناقص فقط.
+- مسموح الحجز لشخص آخر (ابن، زوجة، صديق) — استخدم اسمه في الحجز.
+- استخدم أداة book_appointment للحجز. لا تؤكد الحجز بنص بدون استدعاء الأداة.
+- للاستعلام عن موعد المريض استخدم أداة check_my_appointment.
+- للإلغاء استخدم أداة cancel_appointment بعد تأكيد المريض.
+
+# أيام البديل
+إذا كان يوم فيه طبيب بديل (مذكور أعلاه)، الحجز متاح بنفس الدوام.
+أخبر المريض أن ${clinic.doctor_name} غائب وأن البديل سيكون موجوداً. لا تنكر وجود البديل.
+إذا كان يوم غياب بدون بديل، الحجز مغلق بذلك اليوم — اقترح أقرب يوم متاح.
+
+# تنبيهات
+- لا تعطي نصائح طبية إطلاقاً.
+- إذا ذكر المريض اسم طبيب مختلف عن ${clinic.doctor_name}، أخبره بلطف أن هذه عيادة ${clinic.doctor_name} (لا تستخدم out_of_scope).
+- إذا ما فهمت الطلب، اطلب التوضيح بدل الرفض.`;
 }
 
 // ── Format schedule for system prompt ────────────────────────────────────────
