@@ -5,9 +5,9 @@ const { toolDefinitions, executeTool, searchFAQ } = require('./tools');
 const { saveMessage, loadConversationHistory, supabase, upsertConversationState } = require('../services/supabase');
 const logger = require('../utils/logger');
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_APIDEEP_KEY,baseURL:"https://api.deepseek.com" });
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const MODEL           = 'deepseek-v4-flash';
+const MODEL           = 'gpt-4o-mini';
 const MAX_TOKENS      = 1024;
 const MAX_TOOL_ROUNDS = 5;
 
