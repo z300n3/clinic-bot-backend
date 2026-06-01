@@ -1,8 +1,5 @@
-const dayjs = require('dayjs');
-const utc = require('dayjs/plugin/utc');
-const timezone = require('dayjs/plugin/timezone');
-dayjs.extend(utc);
-dayjs.extend(timezone);
+const OpenAI = require('openai');
+const { getBaghdadNow, formatTime12, TIMEZONE } = require('../utils/time');
 
 const { supabase, upsertConversationState } = require('../services/supabase');
 const logger = require('../utils/logger');
@@ -116,7 +113,7 @@ async function executeTool(name, input, context) {
 
 async function checkAvailability({ date_preference }, { clinic }) {
   try {
-    const now        = dayjs().tz(TIMEZONE);
+    const now        = getBaghdadNow();
     const searchFrom = parseArabicDatePreference(date_preference, now).startOf('day');
     const horizon    = searchFrom.add(14, 'day').endOf('day');
 
@@ -151,8 +148,9 @@ async function checkAvailability({ date_preference }, { clinic }) {
 
     // Count booked appointments per calendar day (Baghdad)
     const bookedByDay = {};
+    const dayjsLib = require('dayjs');
     for (const row of (bookedRes.data || [])) {
-      const k = dayjs(row.scheduled_at).tz(TIMEZONE).format('YYYY-MM-DD');
+      const k = dayjsLib(row.scheduled_at).tz(TIMEZONE).format('YYYY-MM-DD');
       bookedByDay[k] = (bookedByDay[k] || 0) + 1;
     }
 
@@ -224,7 +222,7 @@ async function checkAvailability({ date_preference }, { clinic }) {
 
 async function bookAppointment({ patient_name, appointment_date, reason }, { clinic, patient }) {
   try {
-    const now       = dayjs().tz(TIMEZONE);
+    const now       = getBaghdadNow();
     const targetDay = parseArabicDatePreference(appointment_date, now).startOf('day');
 
     if (!targetDay.isValid()) {
@@ -369,7 +367,7 @@ async function bookAppointment({ patient_name, appointment_date, reason }, { cli
 
 async function getDayBookings({ date_preference }, { clinic }) {
   try {
-    const now = dayjs().tz(TIMEZONE);
+    const now = getBaghdadNow();
     const day = parseArabicDatePreference(date_preference, now).startOf('day');
 
     const dayStartISO = day.toISOString();
@@ -444,9 +442,10 @@ function getDayConfig(dayObj, schedules, clinicWorkingHours) {
 function isDayBlocked(dayObj, blocks) {
   const dayStart = dayObj.startOf('day');
   const dayEnd   = dayObj.endOf('day');
+  const dayjsLib = require('dayjs');
   return blocks.some((block) => {
-    const bStart = dayjs(block.start_at).tz(TIMEZONE);
-    const bEnd   = dayjs(block.end_at).tz(TIMEZONE);
+    const bStart = dayjsLib(block.start_at).tz(TIMEZONE);
+    const bEnd   = dayjsLib(block.end_at).tz(TIMEZONE);
     return bStart.isBefore(dayEnd) && bEnd.isAfter(dayStart);
   });
 }
@@ -519,7 +518,8 @@ async function checkMyAppointment(input, { clinic, patientPhone }) {
       return { success: false, message: 'ما عندك أي موعد قادم مسجل.' };
     }
 
-    const slotDate = dayjs(appt.scheduled_at).tz(TIMEZONE);
+    const dayjsLib = require('dayjs');
+    const slotDate = dayjsLib(appt.scheduled_at).tz(TIMEZONE);
     return {
       success: true,
       message: `عندك موعد مسجل يوم ${formatArabicDay(slotDate)} 📅\n🎫 رقمك بالدور هو: ${appt.queue_number}`
@@ -647,24 +647,14 @@ function parseArabicDatePreference(pref, now) {
     }
   }
 
-  // Explicit date string (YYYY-MM-DD) interpreted in Baghdad time
-  const parsed = dayjs.tz(pref, TIMEZONE);
+  const dayjsLib = require('dayjs');
+  const parsed = dayjsLib.tz(pref, TIMEZONE);
   if (parsed.isValid() && !parsed.isBefore(now.startOf('day'))) return parsed;
 
   return now.add(1, 'day'); // safe default
 }
 
-/**
- * Format HH:MM time string to 12-hour Arabic (e.g. "09:00" → "9:00 ص")
- */
-function formatTime12(timeStr) {
-  if (!timeStr) return null;
-  const [h, m] = timeStr.split(':').map(Number);
-  const h12    = h % 12 || 12;
-  const mm     = String(m || 0).padStart(2, '0');
-  const period = h >= 12 ? 'م' : 'ص';
-  return `${h12}:${mm} ${period}`;
-}
+// Removed formatTime12 since we use it from utils
 
 function formatArabicDay(d) {
   const days   = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];

