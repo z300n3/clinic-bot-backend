@@ -58,6 +58,7 @@ function formatTime12(timeStr) {
 }
 
 module.exports = {
+  dayjs,
   getBaghdadNow,
   isTodayOpen,
   getTodayHoursString,

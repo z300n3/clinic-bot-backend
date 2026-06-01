@@ -1,5 +1,5 @@
 const OpenAI = require('openai');
-const { getBaghdadNow, isTodayOpen, getTodayHoursString, getCurrentTimeString, formatTime12, TIMEZONE } = require('../utils/time');
+const { getBaghdadNow, isTodayOpen, getTodayHoursString, getCurrentTimeString, formatTime12, TIMEZONE, dayjs } = require('../utils/time');
 
 const { toolDefinitions, executeTool, searchFAQ } = require('./tools');
 const { saveMessage, loadConversationHistory, supabase, upsertConversationState } = require('../services/supabase');
@@ -442,12 +442,8 @@ function formatBlocks(blocks) {
 
   return blocks.map((b) => {
     // using dayjs since b.start_at is UTC ISO string
-    const start  = getBaghdadNow().hour(0).minute(0).second(0).add(new Date(b.start_at).getTime() - Date.now(), 'ms'); 
-    // actually, best to just use dayjs wrapper
-    // let's do:
-    const dayjsLib = require('dayjs');
-    const startD = dayjsLib(b.start_at).tz(TIMEZONE);
-    const endD = dayjsLib(b.end_at).tz(TIMEZONE);
+    const startD = dayjs(b.start_at).tz(TIMEZONE);
+    const endD = dayjs(b.end_at).tz(TIMEZONE);
     const reason = b.reason ? ` (${b.reason})` : '';
 
     if (b.is_full_day) {

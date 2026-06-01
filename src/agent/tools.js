@@ -1,10 +1,9 @@
 const OpenAI = require('openai');
-const { getBaghdadNow, formatTime12, TIMEZONE } = require('../utils/time');
+const { getBaghdadNow, formatTime12, TIMEZONE, dayjs } = require('../utils/time');
 
 const { supabase, upsertConversationState } = require('../services/supabase');
 const logger = require('../utils/logger');
 
-const TIMEZONE     = 'Asia/Baghdad';
 const BOOKING_HOUR = 12; // appointments are day-based; we store a fixed marker time (noon Baghdad)
 
 // ── Tool Schemas for Claude ───────────────────────────────────────────────────
@@ -148,9 +147,8 @@ async function checkAvailability({ date_preference }, { clinic }) {
 
     // Count booked appointments per calendar day (Baghdad)
     const bookedByDay = {};
-    const dayjsLib = require('dayjs');
     for (const row of (bookedRes.data || [])) {
-      const k = dayjsLib(row.scheduled_at).tz(TIMEZONE).format('YYYY-MM-DD');
+      const k = dayjs(row.scheduled_at).tz(TIMEZONE).format('YYYY-MM-DD');
       bookedByDay[k] = (bookedByDay[k] || 0) + 1;
     }
 
@@ -442,10 +440,9 @@ function getDayConfig(dayObj, schedules, clinicWorkingHours) {
 function isDayBlocked(dayObj, blocks) {
   const dayStart = dayObj.startOf('day');
   const dayEnd   = dayObj.endOf('day');
-  const dayjsLib = require('dayjs');
   return blocks.some((block) => {
-    const bStart = dayjsLib(block.start_at).tz(TIMEZONE);
-    const bEnd   = dayjsLib(block.end_at).tz(TIMEZONE);
+    const bStart = dayjs(block.start_at).tz(TIMEZONE);
+    const bEnd   = dayjs(block.end_at).tz(TIMEZONE);
     return bStart.isBefore(dayEnd) && bEnd.isAfter(dayStart);
   });
 }
@@ -518,8 +515,7 @@ async function checkMyAppointment(input, { clinic, patientPhone }) {
       return { success: false, message: 'ما عندك أي موعد قادم مسجل.' };
     }
 
-    const dayjsLib = require('dayjs');
-    const slotDate = dayjsLib(appt.scheduled_at).tz(TIMEZONE);
+    const slotDate = dayjs(appt.scheduled_at).tz(TIMEZONE);
     return {
       success: true,
       message: `عندك موعد مسجل يوم ${formatArabicDay(slotDate)} 📅\n🎫 رقمك بالدور هو: ${appt.queue_number}`
@@ -647,8 +643,7 @@ function parseArabicDatePreference(pref, now) {
     }
   }
 
-  const dayjsLib = require('dayjs');
-  const parsed = dayjsLib.tz(pref, TIMEZONE);
+  const parsed = dayjs.tz(pref, TIMEZONE);
   if (parsed.isValid() && !parsed.isBefore(now.startOf('day'))) return parsed;
 
   return now.add(1, 'day'); // safe default
