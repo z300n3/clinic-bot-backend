@@ -162,8 +162,8 @@ async function checkAvailability({ date_preference }, { clinic }) {
       if (dateStr >= todayStr) {
         const { isWorking, capacity, shifts } = getDayConfig(day, schedules, clinic.working_hours || {});
 
-        const blockingPeriod = getBlockingPeriod(day, blocks);
-        const isBlockedNoSub = blockingPeriod && !blockingPeriod.substitute_doctor_name;
+        const block = getBlockForDay(day, blocks);
+        const isBlockedNoSub = block && !block.substitute_doctor_name;
 
         if (isWorking && !isBlockedNoSub) {
           const booked    = bookedByDay[dateStr] || 0;
@@ -187,7 +187,7 @@ async function checkAvailability({ date_preference }, { clinic }) {
 
             days.push({
               date:          dateStr,
-              display:       formatArabicDay(day) + (blockingPeriod?.substitute_doctor_name ? ' (مع طبيب بديل)' : ''),
+              display:       formatArabicDay(day) + (block?.substitute_doctor_name ? ' (مع طبيب بديل)' : ''),
               booked,
               capacity:      unlimited ? null : capacity,
               remaining:     unlimited ? null : capacity - booked,
@@ -277,14 +277,13 @@ async function bookAppointment({ patient_name, appointment_date, reason }, { cli
     let servedBy = null; // null = main doctor
     let substituteNotice = '';
 
-    if (isDayBlocked(targetDay, blocks)) {
-      // Find the blocking period covering this day
-      const blockingPeriod = getBlockingPeriod(targetDay, blocks);
+    const block = getBlockForDay(targetDay, blocks);
 
-      if (blockingPeriod?.substitute_doctor_name) {
+    if (block) {
+      if (block.substitute_doctor_name) {
         // Substitute available — allow booking, same hours
-        servedBy = blockingPeriod.substitute_doctor_name;
-        substituteNotice = `⚠️ ملاحظة: ${clinic.doctor_name || 'الدكتور الأساسي'} غائب هذا اليوم. الطبيب البديل: ${blockingPeriod.substitute_doctor_name}`;
+        servedBy = block.substitute_doctor_name;
+        substituteNotice = `⚠️ ملاحظة: ${clinic.doctor_name || 'الدكتور الأساسي'} غائب هذا اليوم. الطبيب البديل: ${block.substitute_doctor_name}`;
       } else {
         // No substitute — block as before
         return { 
@@ -466,23 +465,17 @@ function getDayConfig(dayObj, schedules, clinicWorkingHours) {
 /**
  * Returns true if any blocked period overlaps the given calendar day.
  */
-function isDayBlocked(dayObj, blocks) {
-  const dayStart = dayObj.startOf('day');
-  const dayEnd   = dayObj.endOf('day');
-  return blocks.some((block) => {
-    const bStart = dayjs(block.start_at).tz(TIMEZONE);
-    const bEnd   = dayjs(block.end_at).tz(TIMEZONE);
-    return bStart.isBefore(dayEnd) && bEnd.isAfter(dayStart);
-  });
-}
-
-function getBlockingPeriod(dayObj, blocks) {
-  const dayStart = dayObj.startOf('day');
-  const dayEnd   = dayObj.endOf('day');
-  return blocks.find((block) => {
-    const bStart = dayjs(block.start_at).tz(TIMEZONE);
-    const bEnd   = dayjs(block.end_at).tz(TIMEZONE);
-    return bStart.isBefore(dayEnd) && bEnd.isAfter(dayStart);
+function getBlockForDay(targetDay, blocks) {
+  // targetDay is a dayjs object in Baghdad timezone
+  const targetDateStr = targetDay.tz(TIMEZONE).format('YYYY-MM-DD');
+  
+  return (blocks || []).find(b => {
+    // Convert block start/end to Baghdad dates
+    const blockStartDate = dayjs(b.start_at).tz(TIMEZONE).format('YYYY-MM-DD');
+    const blockEndDate = dayjs(b.end_at).tz(TIMEZONE).format('YYYY-MM-DD');
+    
+    // Compare as date strings (YYYY-MM-DD) — no time component
+    return targetDateStr >= blockStartDate && targetDateStr <= blockEndDate;
   });
 }
 
