@@ -145,6 +145,23 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
         return result.message;
       }
 
+      if (text.includes('BOOK_APPT|')) {
+        try {
+          const parts = text.split('BOOK_APPT|')[1].split('|');
+          const pName = parts[0]?.trim();
+          const pDate = parts[1]?.trim();
+          const pReason = parts[2]?.trim();
+          
+          if (pName && pDate && pReason) {
+            const result = await executeTool('book_appointment', { patient_name: pName, appointment_date: pDate, reason: pReason }, { clinic, patient, patientPhone });
+            await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: result.message });
+            return result.message;
+          }
+        } catch (e) {
+          logger.error('Text-based BOOK_APPT parsing failed', { error: e.message });
+        }
+      }
+
       await saveMessage({
         clinicId:     clinic.id,
         patientId:    patient.id,
@@ -204,14 +221,7 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
               existing_appt_id: existing.id
             });
             
-            const eDate = getBaghdadNow().tz(TIMEZONE); // fallback if existing is same day, though we really just need its day
-            const existingDate = getBaghdadNow().tz(TIMEZONE); // We'll just use the baghdad date
-            // Let's actually parse the scheduled_at as Baghdad time
-            // Wait, we can just use new Date(existing.scheduled_at) with toLocaleString or similar, but the user requested getBaghdadNow().
-            // Wait, let's keep dayjs internally for existingDate
-            // I'll just restore dayjs for this specific formatting, or use pure JS. 
-            // Wait, getBaghdadNow() returns a dayjs object! So we can just do:
-            const eDate2 = getBaghdadNow().year(new Date(existing.scheduled_at).getFullYear()).month(new Date(existing.scheduled_at).getMonth()).date(new Date(existing.scheduled_at).getDate());
+            const eDate = dayjs(existing.scheduled_at).tz(TIMEZONE);
             const days = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
             const dateStr = `${days[eDate.day()]} ${eDate.format('YYYY/MM/DD')}`;
             
@@ -397,9 +407,11 @@ ${priceInstruction}
 **قواعد الحجز:**
 - الحجز باليوم فقط (لا تسأل عن الساعة).
 - مسموح للمريض أن يحجز لنفسه أو لأي شخص آخر (مثل ابنه، زوجته، أو صديقه).
-- قبل استدعاء أداة الحجز، يجب أن تعرف: الاسم (اسم المريض نفسه أو الشخص الآخر)، اليوم، السبب.
+- قبل الحجز، يجب أن تعرف: الاسم، اليوم، السبب.
 - لا تعطي نصائح طبية (لا تشخيص، لا وصف دواء).
-- تحذير صارم جداً: إياك أن تقوم بتأكيد الحجز بكتابة رسالة تأكيد نصية من عندك! يجب عليك دائماً وحصرياً استخدام الأداة (book_appointment) لكي يتم الحجز في قاعدة البيانات بشكل حقيقي.
+- تحذير صارم جداً: إياك أن تقوم بتأكيد الحجز بكتابة رسالة تأكيد نصية عادية! لتأكيد الحجز، يجب عليك إما استدعاء الأداة book_appointment، أو كتابة الأمر التالي حصراً باللغة الإنجليزية:
+BOOK_APPT|اسم_المريض|تاريخ_الحجز|السبب
+مثال: BOOK_APPT|علي محمد|باجر|مراجعة
 
 **سلوكك مع المريض:**
 - حاول تساعد المريض دائماً قبل ما ترفض أي طلب.
