@@ -67,7 +67,7 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
   ]);
 
   const stateData = stateRes.data?.state_data || {};
-  const subState  = stateData.booking_substate || 'idle';
+  let subState  = stateData.booking_substate || 'idle';
 
   const isYes = /^(نعم|اي|إي|صح|اكيد|أكيد|تمام|زين|موافق|ي|yep|yes|ok)[.!?]*$/i.test(trimmedMsg);
   const isNo = /^(لا|كلا|خطأ|غلط|مو صح|غير|بدل|no|nope|cancel)[.!?]*$/i.test(trimmedMsg);
@@ -93,9 +93,10 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
       await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
       return reply;
     } else {
-      const reply = "تريد تلغي الموعد السابق وتحجز غيره؟ (نعم / لا)";
-      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
-      return reply;
+      // User sent something unrelated — DON'T trap them.
+      // Reset to idle and let the message flow through normal processing.
+      await upsertConversationState(clinic.id, patientPhone, 'active', { booking_substate: 'idle' });
+      subState = 'idle'; // Let the rest of the flow treat it as idle
     }
   }
 
