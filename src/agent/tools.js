@@ -132,7 +132,7 @@ async function checkAvailability({ date_preference }, { clinic }) {
 
       supabase
         .from('blocked_periods')
-        .select('start_at, end_at, is_full_day')
+        .select('start_at, end_at, is_full_day, substitute_doctor_name')
         .eq('clinic_id', clinic.id)
         .lt('start_at', horizon.toISOString())
         .gt('end_at',   searchFrom.toISOString()),
@@ -162,7 +162,10 @@ async function checkAvailability({ date_preference }, { clinic }) {
       if (dateStr >= todayStr) {
         const { isWorking, capacity, shifts } = getDayConfig(day, schedules, clinic.working_hours || {});
 
-        if (isWorking && !isDayBlocked(day, blocks)) {
+        const blockingPeriod = getBlockingPeriod(day, blocks);
+        const isBlockedNoSub = blockingPeriod && !blockingPeriod.substitute_doctor_name;
+
+        if (isWorking && !isBlockedNoSub) {
           const booked    = bookedByDay[dateStr] || 0;
           const unlimited = capacity === null || capacity === undefined;
           const isFull    = !unlimited && booked >= capacity;
@@ -184,7 +187,7 @@ async function checkAvailability({ date_preference }, { clinic }) {
 
             days.push({
               date:          dateStr,
-              display:       formatArabicDay(day),
+              display:       formatArabicDay(day) + (blockingPeriod?.substitute_doctor_name ? ' (مع طبيب بديل)' : ''),
               booked,
               capacity:      unlimited ? null : capacity,
               remaining:     unlimited ? null : capacity - booked,
@@ -276,11 +279,7 @@ async function bookAppointment({ patient_name, appointment_date, reason }, { cli
 
     if (isDayBlocked(targetDay, blocks)) {
       // Find the blocking period covering this day
-      const blockingPeriod = blocks.find(b => {
-        const blockStart = dayjs(b.start_at).tz(TIMEZONE).startOf('day');
-        const blockEnd = dayjs(b.end_at).tz(TIMEZONE).endOf('day');
-        return targetDay.isBetween(blockStart, blockEnd, null, '[]');
-      });
+      const blockingPeriod = getBlockingPeriod(targetDay, blocks);
 
       if (blockingPeriod?.substitute_doctor_name) {
         // Substitute available — allow booking, same hours
@@ -471,6 +470,16 @@ function isDayBlocked(dayObj, blocks) {
   const dayStart = dayObj.startOf('day');
   const dayEnd   = dayObj.endOf('day');
   return blocks.some((block) => {
+    const bStart = dayjs(block.start_at).tz(TIMEZONE);
+    const bEnd   = dayjs(block.end_at).tz(TIMEZONE);
+    return bStart.isBefore(dayEnd) && bEnd.isAfter(dayStart);
+  });
+}
+
+function getBlockingPeriod(dayObj, blocks) {
+  const dayStart = dayObj.startOf('day');
+  const dayEnd   = dayObj.endOf('day');
+  return blocks.find((block) => {
     const bStart = dayjs(block.start_at).tz(TIMEZONE);
     const bEnd   = dayjs(block.end_at).tz(TIMEZONE);
     return bStart.isBefore(dayEnd) && bEnd.isAfter(dayStart);
