@@ -92,9 +92,16 @@ async function validateExtracted(extracted, clinic, patient, stateData, userMess
 
       case 'specialty':
       case 'services':
-        result.directAnswer = clinic.specialty
-          ? `الدكتور ${clinic.doctor_name || 'المختص'} اختصاصه ${clinic.specialty}. للحالات ضمن هذا الاختصاص تكدر تحجز موعد 😊`
-          : `تكدر تحجز موعد والدكتور يشوف حالتك.`;
+        if (clinic.specialty) {
+          let ans = `الدكتور ${clinic.doctor_name || 'المختص'} اختصاصه ${clinic.specialty}.`;
+          if (clinic.treated_diseases) {
+            ans += `\nيعالج الحالات التالية: ${clinic.treated_diseases}`;
+          }
+          ans += `\nللحالات ضمن هذا الاختصاص تكدر تحجز موعد 😊`;
+          result.directAnswer = ans;
+        } else {
+          result.directAnswer = `تكدر تحجز موعد والدكتور يشوف حالتك.`;
+        }
         break;
 
       case 'custom':
