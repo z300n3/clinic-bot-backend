@@ -18,6 +18,9 @@ async function execute(decision, clinic, patient, patientPhone) {
     case 'REPLY_FAQ':
       return decision.answer;
 
+    case 'REPLY_ABSENCE':
+      return decision.summary;
+
     case 'REPLY_SCHEDULE':
       return decision.summary;
 

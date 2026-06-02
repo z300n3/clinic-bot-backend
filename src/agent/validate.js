@@ -1,6 +1,6 @@
 const { supabase } = require('../services/supabase');
 const { getBaghdadNow, TIMEZONE, dayjs } = require('../utils/time');
-const { searchFAQ, getDynamicScheduleSummary } = require('./tools');
+const { searchFAQ, getDynamicScheduleSummary, getAbsenceSummary } = require('./tools');
 const logger = require('../utils/logger');
 
 async function validateExtracted(extracted, clinic, patient, stateData) {
@@ -20,6 +20,7 @@ async function validateExtracted(extracted, clinic, patient, stateData) {
     dayInfo:        null,
     faqAnswer:      null,
     scheduleSummary:null,
+    absenceSummary: null,
     upcomingAppts:  [],
   };
 
@@ -53,7 +54,9 @@ async function validateExtracted(extracted, clinic, patient, stateData) {
   }
 
   // 4. FAQ answer or Schedule Summary
-  if (extracted.faq_topic === 'hours') {
+  if (extracted.faq_topic === 'absence') {
+    result.absenceSummary = await getAbsenceSummary(clinic.id);
+  } else if (extracted.faq_topic === 'hours') {
     result.scheduleSummary = await getDynamicScheduleSummary(clinic.id);
   } else if (extracted.faq_topic || extracted.intent === 'inquiry') {
     const searchTerm = extracted.faq_topic || extracted.date_preference || '';

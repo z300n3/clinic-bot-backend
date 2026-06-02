@@ -818,11 +818,55 @@ async function getDynamicScheduleSummary(clinicId) {
   return lines.join('\n\n');
 }
 
+async function getAbsenceSummary(clinicId) {
+  const now = getBaghdadNow();
+  const next7DaysEnd = now.add(7, 'day').endOf('day');
+
+  const { data: blocks } = await supabase
+    .from('blocked_periods')
+    .select('start_at, end_at, is_full_day, reason, substitute_doctor_name')
+    .eq('clinic_id', clinicId)
+    .lte('start_at', next7DaysEnd.toISOString())
+    .gte('end_at', now.startOf('day').toISOString());
+
+  if (!blocks || blocks.length === 0) {
+    return "لا توجد أي إجازات أو غيابات مجدولة للدكتور خلال الأيام القادمة، الدوام مستمر بشكل طبيعي. 😊";
+  }
+
+  const daysAr = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+  let lines = [];
+  lines.push("⚠️ *معلومات غياب الدكتور للأيام القادمة:*\n");
+
+  // We only show days that have blocks
+  for (let i = 0; i < 7; i++) {
+    const targetDay = now.add(i, 'day');
+    const targetStartISO = targetDay.startOf('day').toISOString();
+    const targetEndISO = targetDay.endOf('day').toISOString();
+
+    const block = blocks.find(b => b.start_at < targetEndISO && b.end_at > targetStartISO);
+    
+    if (block) {
+      const dayOfWeek = targetDay.day();
+      const displayDate = `${daysAr[dayOfWeek]} (${targetDay.format('DD/MM')})`;
+      let note = "";
+      if (block.substitute_doctor_name) {
+        note = `الدكتور الأساسي غائب وسيتواجد دكتور بديل: *${block.substitute_doctor_name}*`;
+      } else {
+        note = "العيادة مغلقة (إجازة/غياب الدكتور)";
+      }
+      lines.push(`🔹 *${displayDate}*:\n   ${note}`);
+    }
+  }
+
+  return lines.join('\n\n');
+}
+
 module.exports = { 
   toolDefinitions, 
   executeTool, 
   searchFAQ,
   getDayConfig,
   parseArabicDatePreference,
-  getDynamicScheduleSummary
+  getDynamicScheduleSummary,
+  getAbsenceSummary
 };

@@ -64,14 +64,14 @@ async function extractIntent(userMessage, currentState, stateData) {
   "patient_name": "الاسم الكامل أو null — فقط إذا ذُكر صراحةً",
   "date_preference": "التاريخ أو اليوم أو null",
   "reason": "سبب الزيارة أو null",
-  "faq_topic": "hours|price|location|specialty أو null"
+  "faq_topic": "hours|absence|price|location|specialty أو null"
 }
 
 قواعد:
 - patient_name: اسم شخص فقط (كلمة أو كلمتين تبدو كاسم). لا تضع جمل.
 - date_preference: أي إشارة زمنية (باجر، الخميس، هاي الأسبوع، اليوم...).
 - reason: الشكوى الطبية أو سبب الزيارة.
-- faq_topic: hours إذا سأل عن الدوام، location إذا سأل عن العنوان.
+- faq_topic: hours إذا سأل عن أوقات الدوام بشكل عام، absence إذا سأل عن غياب الدكتور أو إجازته أو البديل، location إذا سأل عن العنوان.
 - ملاحظة هامة: إذا كانت الحالة الحالية (awaiting_info أو awaiting_date) وأرسل المريض نصاً قصيراً، افترض أنه يجيب على سؤال لإكمال الحجز (مثلاً إذا أرسل اسماً ضعه في patient_name، وإذا أرسل موعداً ضعه في date_preference، وإذا أرسل عرضاً مرضياً ضعه في reason)، واعطِ intent قيمة "booking".`
 
   try {

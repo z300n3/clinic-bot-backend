@@ -27,6 +27,8 @@ function decide(extracted, checks, currentState, stateData) {
 
   // ── FAQ / Inquiry ─────────────────────────────────────────────────────────
   if (intent === 'inquiry') {
+    if (checks.absenceSummary)
+      return { action: 'REPLY_ABSENCE', summary: checks.absenceSummary };
     if (checks.scheduleSummary)
       return { action: 'REPLY_SCHEDULE', summary: checks.scheduleSummary };
     if (checks.faqAnswer)
