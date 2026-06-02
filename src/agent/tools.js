@@ -659,16 +659,32 @@ async function escalateToHuman({ reason }, { clinic, patientPhone }) {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function parseArabicDatePreference(pref, now) {
-  const lower = (pref || '').toLowerCase();
+  const lower = (pref || '').toLowerCase().trim();
 
-  if (lower.includes('اليوم') || lower.includes('today'))             return now;
-  if (lower.includes('غداً') || lower.includes('غد') || lower.includes('بكره') || lower.includes('tomorrow')) return now.add(1, 'day');
-  if (lower.includes('بعد غد') || lower.includes('بعد بكره'))         return now.add(2, 'day');
-  if (lower.includes('الأسبوع القادم') || lower.includes('الجاي'))    return now.add(7, 'day');
+  // Today
+  if (lower.includes('اليوم') || lower.includes('today')) {
+    return now.clone();
+  }
 
+  // Day after tomorrow (check BEFORE tomorrow to avoid partial match)
+  if (lower.includes('بعد غد') || lower.includes('بعد بكره') || lower.includes('بعد باجر')) {
+    return now.add(2, 'day');
+  }
+
+  // Tomorrow
+  if (lower.includes('غد') || lower.includes('بكره') || lower.includes('باجر') || lower.includes('tomorrow')) {
+    return now.add(1, 'day');
+  }
+
+  // Next week
+  if (lower.includes('الأسبوع القادم') || lower.includes('الاسبوع الجاي') || lower.includes('الجاي')) {
+    return now.add(7, 'day');
+  }
+
+  // Day names
   const dayNames = {
-    'الأحد': 0, 'الاثنين': 1, 'الثلاثاء': 2, 'الأربعاء': 3,
-    'الخميس': 4, 'الجمعة': 5, 'السبت': 6,
+    'الأحد': 0, 'الاحد': 0, 'الاثنين': 1, 'الإثنين': 1, 'الثلاثاء': 2,
+    'الأربعاء': 3, 'الاربعاء': 3, 'الخميس': 4, 'الجمعة': 5, 'السبت': 6,
     sunday: 0, monday: 1, tuesday: 2, wednesday: 3,
     thursday: 4, friday: 5, saturday: 6,
   };
@@ -676,17 +692,25 @@ function parseArabicDatePreference(pref, now) {
   for (const [name, num] of Object.entries(dayNames)) {
     if (lower.includes(name)) {
       let target = now.day(num);
-      if (!target.isAfter(now.endOf('day'))) {
+      // If that day already passed this week, move to next week
+      if (target.format('YYYY-MM-DD') <= now.format('YYYY-MM-DD')) {
         target = target.add(7, 'day');
       }
       return target;
     }
   }
 
-  const parsed = dayjs.tz(pref, TIMEZONE);
-  if (parsed.isValid() && !parsed.isBefore(now.startOf('day'))) return parsed;
+  // Try parsing as explicit date (YYYY-MM-DD)
+  const isoMatch = /\d{4}-\d{2}-\d{2}/.exec(pref || '');
+  if (isoMatch) {
+    const parsed = dayjs.tz(isoMatch[0], 'YYYY-MM-DD', TIMEZONE);
+    if (parsed.isValid() && parsed.format('YYYY-MM-DD') >= now.format('YYYY-MM-DD')) {
+      return parsed;
+    }
+  }
 
-  return now.add(1, 'day'); // safe default
+  // Safe default: tomorrow (NEVER return invalid)
+  return now.add(1, 'day');
 }
 
 // Removed formatTime12 since we use it from utils

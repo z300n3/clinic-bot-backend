@@ -85,6 +85,11 @@ async function checkDayInfo(datePreference, clinic) {
   const now = getBaghdadNow();
   const targetDay = parseArabicDatePreference(datePreference, now).startOf('day');
 
+  if (!targetDay.isValid()) {
+    logger.error('[Validate] Invalid date from preference', { datePreference });
+    return null; // decide.js will treat null dayInfo as "ask for date"
+  }
+
   const dayStartISO = targetDay.toISOString();
   const dayEndISO   = targetDay.endOf('day').toISOString();
   const dateStr     = targetDay.format('YYYY-MM-DD');
