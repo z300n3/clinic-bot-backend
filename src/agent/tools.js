@@ -712,4 +712,10 @@ function extractKeywords(text) {
     .slice(0, 5);
 }
 
-module.exports = { toolDefinitions, executeTool, searchFAQ };
+module.exports = { 
+  toolDefinitions, 
+  executeTool, 
+  searchFAQ,
+  getDayConfig,
+  parseArabicDatePreference
+};

@@ -1,0 +1,215 @@
+const { supabase, saveMessage, upsertConversationState } = require('../services/supabase');
+const { getBaghdadNow, formatTime12, TIMEZONE, dayjs } = require('../utils/time');
+const logger = require('../utils/logger');
+
+const BOOKING_HOUR = 12;
+
+async function execute(decision, clinic, patient, patientPhone) {
+  const { action } = decision;
+
+  switch (action) {
+
+    case 'REPLY_GREETING':
+      return `أهلاً بك في عيادة ${clinic.name}! 😊\nأكدر أساعدك بـ: حجز موعد، أوقات الدوام، العنوان، أو السعر.`;
+
+    case 'REPLY_MEDICAL_REJECT':
+      return 'ما أكدر أساعدك بهالموضوع، بس أكدر أساعدك بحجز موعد عند الدكتور وهو يفيدك أكثر 😊';
+
+    case 'REPLY_FAQ':
+      return decision.answer;
+
+    case 'REPLY_CONTACT_CLINIC':
+      return 'ما عندي معلومة عن هذا الموضوع، تواصل مع العيادة مباشرة للاستفسار.';
+
+    case 'ASK_MISSING': {
+      const fields = decision.fields.join(' و ');
+      return `أحتاج منك ${fields} لإكمال الحجز 😊`;
+    }
+
+    case 'ASK_FULL_NAME':
+      return 'أحتاج الاسم الثنائي على الأقل (مثال: علي حسن). تفضل؟';
+
+    case 'NO_APPOINTMENTS':
+      return 'ما عندك أي موعد قادم مسجل حالياً.';
+
+    case 'SHOW_APPOINTMENTS': {
+      const { appts } = decision;
+      const lines = appts.map(a => {
+        const d = dayjs(a.scheduled_at).tz(TIMEZONE);
+        const days = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+        const months = ['يناير','فبراير','مارس','أبريل','مايو','يونيو',
+                        'يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+        const dateStr = `${days[d.day()]} ${d.date()} ${months[d.month()]}`;
+        return `📅 ${dateStr} — 🎫 رقم الدور: ${a.queue_number} — 👤 ${a.patient_name || ''}`;
+      });
+      return `مواعيدك القادمة:\n${lines.join('\n')}`;
+    }
+
+    case 'CONFIRM_CANCEL':
+      return 'تأكد إنك تريد إلغاء موعدك القادم؟ (نعم / لا)';
+
+    case 'DO_CANCEL': {
+      const { data: pat } = await supabase
+        .from('patients').select('id')
+        .eq('clinic_id', clinic.id).eq('phone_number', patientPhone).maybeSingle();
+
+      if (!pat) return 'ما وجدنا بيانات لهذا الرقم.';
+
+      const { data: appt } = await supabase
+        .from('appointments').select('id, scheduled_at')
+        .eq('clinic_id', clinic.id).eq('patient_id', pat.id)
+        .in('status', ['scheduled','confirmed'])
+        .gte('scheduled_at', new Date().toISOString())
+        .order('scheduled_at', { ascending: true }).limit(1).maybeSingle();
+
+      if (!appt) return 'ما عندك مواعيد قادمة.';
+
+      await supabase.from('appointments')
+        .update({ status: 'cancelled', cancelled_at: new Date().toISOString() })
+        .eq('id', appt.id);
+
+      await upsertConversationState(clinic.id, patientPhone, 'active', {});
+      return 'تم إلغاء موعدك بنجاح ✅';
+    }
+
+    case 'CONFIRM_REBOOK': {
+      const { existingAppt } = decision;
+      const d = dayjs(existingAppt.scheduled_at).tz(TIMEZONE);
+      const days = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+      const months = ['يناير','فبراير','مارس','أبريل','مايو','يونيو',
+                      'يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+      const dateStr = `${days[d.day()]} ${d.date()} ${months[d.month()]}`;
+
+      await upsertConversationState(clinic.id, patientPhone, 'active', {
+        booking_substate: 'awaiting_rebook_confirm',
+        existing_appt_id: existingAppt.id,
+      });
+
+      return `عندك موعد محجوز يوم ${dateStr} باسم "${existingAppt.patient_name}" 📅\nتريد تلغيه وتحجز غيره؟ (نعم / لا)`;
+    }
+
+    case 'DO_REBOOK': {
+      const { existing_appt_id } = decision.data;
+      if (existing_appt_id) {
+        await supabase.from('appointments')
+          .update({ status: 'cancelled', cancelled_at: new Date().toISOString() })
+          .eq('id', existing_appt_id);
+      }
+      await upsertConversationState(clinic.id, patientPhone, 'active', {});
+      return 'تم إلغاء الموعد السابق ✅\nأي يوم يناسبك للحجز الجديد؟';
+    }
+
+    case 'CANCEL_FLOW':
+      await upsertConversationState(clinic.id, patientPhone, 'active', {});
+      return 'تمام، موعدك محجوز كما هو 👍';
+
+    case 'DAY_NOT_WORKING': {
+      const { dayInfo } = decision;
+      return `${dayInfo.displayDate} مو يوم دوام في العيادة. تكدر تحجز يوم ثاني؟`;
+    }
+
+    case 'DAY_BLOCKED': {
+      const { dayInfo } = decision;
+      return `${dayInfo.displayDate} الدكتور غير متوفر ولا يوجد بديل. تكدر تحجز يوم ثاني؟`;
+    }
+
+    case 'SHIFT_ENDED': {
+      const { dayInfo } = decision;
+      return `انتهى دوام اليوم. تكدر تحجز ليوم ثاني؟`;
+    }
+
+    case 'DAY_FULL': {
+      const { dayInfo } = decision;
+      return `عذراً، اكتمل العدد ليوم ${dayInfo.displayDate}. جرب يوماً آخر.`;
+    }
+
+    case 'BOOK':
+    case 'BOOK_WITH_SUBSTITUTE': {
+      return await doBooking(decision, clinic, patient, patientPhone);
+    }
+
+    case 'UNCLEAR':
+      return 'ما فهمت طلبك. تكدر توضح شنو تريد؟ 😊';
+
+    default:
+      logger.warn('[Execute] Unknown action', { action });
+      return 'عذراً، صار خطأ. حاول مرة ثانية.';
+  }
+}
+
+async function doBooking(decision, clinic, patient) {
+  const { extracted, dayInfo } = decision;
+  const now = getBaghdadNow();
+
+  const targetDay = dayjs(dayInfo.targetDay).tz(TIMEZONE);
+  const dayStartISO = targetDay.toISOString();
+  const dayEndISO   = targetDay.endOf('day').toISOString();
+
+  const { data: bookedAppts } = await supabase
+    .from('appointments').select('id')
+    .eq('clinic_id', clinic.id)
+    .in('status', ['scheduled','confirmed'])
+    .gte('scheduled_at', dayStartISO)
+    .lte('scheduled_at', dayEndISO);
+
+  const booked      = (bookedAppts || []).length;
+  const queueNumber = booked + 1;
+  const duration    = clinic.appointment_duration_minutes || 30;
+  const scheduledAt = targetDay.hour(BOOKING_HOUR).minute(0).second(0).millisecond(0);
+
+  // Estimated time
+  const shift = dayInfo.shifts?.[0];
+  let estimatedLine = '';
+  let workHoursLine = '';
+  if (shift?.open) {
+    const [sh, sm] = shift.open.split(':').map(Number);
+    const estimated = targetDay.hour(sh).minute(sm || 0)
+      .add((queueNumber - 1) * duration, 'minute');
+    estimatedLine = `⏰ وقتك التقريبي: ${formatTime12(estimated.format('HH:mm'))}`;
+    const openFmt  = formatTime12(shift.open);
+    const closeFmt = shift.close ? ` — ${formatTime12(shift.close)}` : '';
+    workHoursLine  = `🕐 دوام العيادة: ${openFmt}${closeFmt}`;
+  }
+
+  const servedBy = dayInfo.substitute || null;
+
+  const { data: appt, error } = await supabase
+    .from('appointments')
+    .insert({
+      clinic_id:        clinic.id,
+      patient_id:       patient.id,
+      scheduled_at:     scheduledAt.toISOString(),
+      duration_minutes: duration,
+      queue_number:     queueNumber,
+      status:           'scheduled',
+      reason:           extracted.reason,
+      patient_name:     extracted.patient_name,
+      served_by:        servedBy,
+    })
+    .select('id').single();
+
+  if (error) {
+    logger.error('[Execute] Booking insert failed', { error: error.message });
+    return 'فشل حفظ الموعد. حاول مرة ثانية أو تواصل معنا مباشرة.';
+  }
+
+  const ref = appt.id.slice(-6).toUpperCase();
+  const substituteNote = servedBy
+    ? `⚠️ ملاحظة: ${clinic.doctor_name} غائب هذا اليوم. البديل: ${servedBy}`
+    : null;
+
+  return [
+    'تم تثبيت موعدك بنجاح! ✅',
+    `📅 ${dayInfo.displayDate}`,
+    substituteNote,
+    `🎫 رقمك بالدور: ${queueNumber}`,
+    estimatedLine || null,
+    workHoursLine || null,
+    `👤 ${extracted.patient_name}`,
+    `📝 ${extracted.reason}`,
+    `رقم الحجز: #${ref}`,
+    'راجع العيادة بهذا اليوم وبيكون دورك حسب رقمك.',
+  ].filter(Boolean).join('\n');
+}
+
+module.exports = { execute };
