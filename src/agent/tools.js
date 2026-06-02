@@ -758,7 +758,7 @@ async function getDynamicScheduleSummary(clinicId) {
 
   const daysAr = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
   let lines = [];
-  lines.push("أوقات الدوام للعيادة خلال الأيام القادمة:");
+  lines.push("🗓️ *أوقات الدوام للعيادة خلال الأيام القادمة:*\n");
 
   for (let i = 0; i < 7; i++) {
     const targetDay = now.add(i, 'day');
@@ -805,17 +805,17 @@ async function getDynamicScheduleSummary(clinicId) {
 
     if (block) {
       if (block.substitute_doctor_name) {
-        scheduleText += ` (ملاحظة: الدكتور الأساسي غائب وسيتواجد دكتور بديل: ${block.substitute_doctor_name})`;
+        scheduleText += `\n   ⚠️ (ملاحظة: الدكتور الأساسي غائب وسيتواجد دكتور بديل: ${block.substitute_doctor_name})`;
       } else {
         scheduleText = "مغلق (إجازة/غياب الدكتور)";
       }
     }
 
     let prefix = i === 0 ? "اليوم " : i === 1 ? "غداً " : "";
-    lines.push(`- ${prefix}${displayDate}: ${scheduleText}`);
+    lines.push(`🔹 *${prefix}${displayDate}:*\n   ${scheduleText}`);
   }
 
-  return lines.join('\\n');
+  return lines.join('\n\n');
 }
 
 module.exports = { 
