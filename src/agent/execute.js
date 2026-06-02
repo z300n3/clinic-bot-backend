@@ -22,12 +22,27 @@ async function execute(decision, clinic, patient, patientPhone) {
       return 'ما عندي معلومة عن هذا الموضوع، تواصل مع العيادة مباشرة للاستفسار.';
 
     case 'ASK_MISSING': {
+      await upsertConversationState(clinic.id, patientPhone, 'active', {
+        booking_substate: 'awaiting_info',
+        partial_booking: {
+          patient_name: decision.extracted?.patient_name || null,
+          reason:       decision.extracted?.reason || null,
+        }
+      });
       const fields = decision.fields.join(' و ');
       return `أحتاج منك ${fields} لإكمال الحجز 😊`;
     }
 
-    case 'ASK_FULL_NAME':
+    case 'ASK_FULL_NAME': {
+      await upsertConversationState(clinic.id, patientPhone, 'active', {
+        booking_substate: 'awaiting_info',
+        partial_booking: {
+          patient_name: decision.extracted?.patient_name || null,
+          reason:       decision.extracted?.reason || null,
+        }
+      });
       return 'أحتاج الاسم الثنائي على الأقل (مثال: علي حسن). تفضل؟';
+    }
 
     case 'NO_APPOINTMENTS':
       return 'ما عندك أي موعد قادم مسجل حالياً.';

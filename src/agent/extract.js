@@ -70,7 +70,8 @@ async function extractIntent(userMessage, currentState, stateData) {
 - patient_name: اسم شخص فقط (كلمة أو كلمتين تبدو كاسم). لا تضع جمل.
 - date_preference: أي إشارة زمنية (باجر، الخميس، هاي الأسبوع، اليوم...).
 - reason: الشكوى الطبية أو سبب الزيارة.
-- faq_topic: hours إذا سأل عن الدوام، location إذا سأل عن العنوان.`
+- faq_topic: hours إذا سأل عن الدوام، location إذا سأل عن العنوان.
+- ملاحظة هامة: إذا كانت الحالة الحالية (awaiting_info أو awaiting_date) وأرسل المريض نصاً قصيراً، افترض أنه يجيب على سؤال لإكمال الحجز (مثلاً إذا أرسل اسماً ضعه في patient_name، وإذا أرسل موعداً ضعه في date_preference، وإذا أرسل عرضاً مرضياً ضعه في reason)، واعطِ intent قيمة "booking".`
 
   try {
     const response = await client.chat.completions.create({

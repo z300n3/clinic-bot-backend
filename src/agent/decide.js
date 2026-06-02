@@ -52,15 +52,15 @@ function decide(extracted, checks, currentState, stateData) {
     if (!extracted.reason)          missing.push('سبب الزيارة');
 
     if (missing.length > 0)
-      return { action: 'ASK_MISSING', fields: missing };
+      return { action: 'ASK_MISSING', fields: missing, extracted };
 
     // Only check dayInfo if we have a date
     if (!checks.dayInfo)
-      return { action: 'ASK_MISSING', fields: ['اليوم المطلوب للحجز'] };
+      return { action: 'ASK_MISSING', fields: ['اليوم المطلوب للحجز'], extracted };
 
     // Name must be two words
     if (!checks.nameValid)
-      return { action: 'ASK_FULL_NAME' };
+      return { action: 'ASK_FULL_NAME', extracted };
 
     // Existing appointment with same name
     if (checks.existingAppt)

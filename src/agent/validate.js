@@ -5,7 +5,7 @@ const logger = require('../utils/logger');
 
 async function validateExtracted(extracted, clinic, patient, stateData) {
   // Merge partial booking context if available
-  if (stateData.booking_substate === 'awaiting_date' && stateData.partial_booking) {
+  if (['awaiting_date', 'awaiting_info'].includes(stateData.booking_substate) && stateData.partial_booking) {
     if (!extracted.patient_name && stateData.partial_booking.patient_name) {
       extracted.patient_name = stateData.partial_booking.patient_name;
     }
