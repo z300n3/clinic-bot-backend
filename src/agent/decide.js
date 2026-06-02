@@ -74,13 +74,13 @@ function decide(extracted, checks, currentState, stateData) {
         return { action: 'DAY_NOT_WORKING', dayInfo: d };
 
       if (d.isBlocked)
-        return { action: 'DAY_BLOCKED', dayInfo: d };
+        return { action: 'DAY_BLOCKED', dayInfo: d, extracted };
 
       if (d.shiftEnded)
-        return { action: 'SHIFT_ENDED', dayInfo: d };
+        return { action: 'SHIFT_ENDED', dayInfo: d, extracted };
 
       if (d.isFull)
-        return { action: 'DAY_FULL', dayInfo: d };
+        return { action: 'DAY_FULL', dayInfo: d, extracted };
 
       if (d.substitute)
         return { action: 'BOOK_WITH_SUBSTITUTE', dayInfo: d, extracted };

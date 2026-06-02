@@ -4,6 +4,16 @@ const { searchFAQ } = require('./tools');
 const logger = require('../utils/logger');
 
 async function validateExtracted(extracted, clinic, patient, stateData) {
+  // Merge partial booking context if available
+  if (stateData.booking_substate === 'awaiting_date' && stateData.partial_booking) {
+    if (!extracted.patient_name && stateData.partial_booking.patient_name) {
+      extracted.patient_name = stateData.partial_booking.patient_name;
+    }
+    if (!extracted.reason && stateData.partial_booking.reason) {
+      extracted.reason = stateData.partial_booking.reason;
+    }
+  }
+
   const result = {
     nameValid:      false,
     existingAppt:   null,

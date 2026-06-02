@@ -110,21 +110,46 @@ async function execute(decision, clinic, patient, patientPhone) {
 
     case 'DAY_BLOCKED': {
       const { dayInfo } = decision;
+      await upsertConversationState(clinic.id, patientPhone, 'active', {
+        booking_substate: 'awaiting_date',
+        partial_booking: {
+          patient_name: decision.extracted?.patient_name || null,
+          reason:       decision.extracted?.reason || null,
+        }
+      });
       return `${dayInfo.displayDate} الدكتور غير متوفر ولا يوجد بديل. تكدر تحجز يوم ثاني؟`;
     }
 
     case 'SHIFT_ENDED': {
+      await upsertConversationState(clinic.id, patientPhone, 'active', {
+        booking_substate: 'awaiting_date',
+        partial_booking: {
+          patient_name: decision.extracted?.patient_name || null,
+          reason:       decision.extracted?.reason || null,
+        }
+      });
       return 'انتهى دوام العيادة اليوم 🕐\nتكدر تحجز ليوم ثاني؟ قولي أي يوم يناسبك.';
     }
 
     case 'DAY_FULL': {
       const { dayInfo } = decision;
+      await upsertConversationState(clinic.id, patientPhone, 'active', {
+        booking_substate: 'awaiting_date',
+        partial_booking: {
+          patient_name: decision.extracted?.patient_name || null,
+          reason:       decision.extracted?.reason || null,
+        }
+      });
       return `عذراً، اكتمل العدد ليوم ${dayInfo.displayDate}. جرب يوماً آخر.`;
     }
 
     case 'BOOK':
     case 'BOOK_WITH_SUBSTITUTE': {
-      return await doBooking(decision, clinic, patient, patientPhone);
+      const result = await doBooking(decision, clinic, patient, patientPhone);
+      await upsertConversationState(clinic.id, patientPhone, 'active', {
+        booking_substate: 'idle'
+      });
+      return result;
     }
 
     case 'UNCLEAR':

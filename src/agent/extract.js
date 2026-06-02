@@ -18,9 +18,20 @@ async function extractIntent(userMessage, currentState, stateData) {
   if (isNo)  return { intent: 'rejection',    patient_name: null, date_preference: null, reason: null, faq_topic: null };
 
   // Fast-path: detect greeting without AI
-  const greetingRegex = /^(مرحبا|السلام عليكم|هلو|هلا|شلونك|كيفك|مرحباً|صباح|مساء)[.!?]*$/i;
+  const greetingRegex = /^(مرحبا|السلام عليكم|هلو|هلا|شلونك|كيفك|مرحباً|صباح الخير|مساء الخير|صباح النور|مساء النور)[.!?،\s]*$/i;
   if (greetingRegex.test(msg)) {
     return { intent: 'greeting', patient_name: null, date_preference: null, reason: null, faq_topic: null };
+  }
+
+  const dateOnlyRegex = /^(باجر|بكره|غداً|غدا|اليوم|بعد غد|بعد بكره|الاثنين|الثلاثاء|الاربعاء|الخميس|الجمعة|السبت|الاحد)[.!?،\s]*$/i;
+  if (dateOnlyRegex.test(msg)) {
+    return { 
+      intent: 'booking', 
+      patient_name: null, 
+      date_preference: msg.trim(), 
+      reason: null, 
+      faq_topic: null 
+    };
   }
 
   // Fast-path: price
