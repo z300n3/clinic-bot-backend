@@ -77,16 +77,30 @@ async function extractIntent(userMessage, currentState, stateData) {
   try {
     const response = await client.chat.completions.create({
       model: MODEL,
-      max_tokens: 150,
+      max_tokens: 500,
+      response_format: { type: 'json_object' },
       messages: [{ role: 'user', content: prompt }]
     });
 
     const text = response.choices[0].message.content?.trim() || '';
-    const clean = text.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
     
-    logger.debug('[Extract]', parsed);
-    return parsed;
+    // Extract JSON block even if there is surrounding text
+    let clean = text;
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      clean = jsonMatch[0];
+    }
+    
+    clean = clean.replace(/```json|```/g, '').trim();
+    
+    try {
+      const parsed = JSON.parse(clean);
+      logger.debug('[Extract]', parsed);
+      return parsed;
+    } catch (parseErr) {
+      logger.error('[Extract] JSON Parse Error', { text, clean, error: parseErr.message });
+      throw parseErr;
+    }
   } catch (err) {
     logger.error('[Extract] failed', { error: err.message });
     return { intent: 'unclear', patient_name: null, date_preference: null, reason: null, faq_topic: null };
