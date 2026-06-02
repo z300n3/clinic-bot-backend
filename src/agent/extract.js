@@ -2,10 +2,11 @@ const OpenAI = require('openai');
 const logger = require('../utils/logger');
 
 const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+  apiKey:  process.env.OPENAI_APIDEEP_KEY,
+  baseURL: 'https://api.deepseek.com'
 });
 
-const MODEL = 'gpt-4o-mini';
+const MODEL = 'deepseek-v4-pro';
 
 async function extractIntent(userMessage, currentState, stateData) {
   // Fast-path: detect confirmation/rejection without AI
