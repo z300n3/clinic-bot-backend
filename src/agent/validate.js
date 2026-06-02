@@ -22,6 +22,7 @@ async function validateExtracted(extracted, clinic, patient, stateData, userMess
     scheduleSummary:null,
     absenceSummary: null,
     specificDayInfo:null,
+    directAnswer:   null,
     upcomingAppts:  [],
   };
 
@@ -70,9 +71,14 @@ async function validateExtracted(extracted, clinic, patient, stateData, userMess
       result.scheduleSummary = await getDynamicScheduleSummary(clinic.id);
     }
   } else if (extracted.faq_topic || extracted.intent === 'inquiry') {
-    const searchTerm = extracted.faq_topic === 'general_faq' ? userMessage : (extracted.faq_topic || extracted.date_preference || userMessage);
-    const faq = await searchFAQ(clinic.id, searchTerm);
-    result.faqAnswer = faq.found ? faq.answer : null;
+    if (extracted.faq_topic === 'price' && clinic.consultation_price) {
+      result.directAnswer = `سعر الكشفية ${clinic.consultation_price} دينار 😊`;
+    } else if (extracted.faq_topic === 'location' && clinic.address) {
+      result.directAnswer = `عنوان العيادة: ${clinic.address} 📍`;
+    } else {
+      const faq = await searchFAQ(clinic.id, userMessage);
+      result.faqAnswer = faq.found ? faq.answer : null;
+    }
   }
 
   // 5. Check patient's upcoming appointments (for check_appointment intent)

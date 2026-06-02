@@ -33,6 +33,8 @@ function decide(extracted, checks, currentState, stateData) {
       return { action: 'REPLY_ABSENCE', summary: checks.absenceSummary };
     if (checks.scheduleSummary)
       return { action: 'REPLY_SCHEDULE', summary: checks.scheduleSummary };
+    if (checks.directAnswer)
+      return { action: 'REPLY_DIRECT', answer: checks.directAnswer };
     if (checks.faqAnswer)
       return { action: 'REPLY_FAQ', answer: checks.faqAnswer };
     return { action: 'REPLY_CONTACT_CLINIC' };

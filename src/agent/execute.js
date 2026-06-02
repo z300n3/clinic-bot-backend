@@ -18,6 +18,9 @@ async function execute(decision, clinic, patient, patientPhone) {
     case 'REPLY_FAQ':
       return decision.answer;
 
+    case 'REPLY_DIRECT':
+      return decision.answer;
+
     case 'REPLY_SPECIFIC_DAY': {
       const { dayInfo } = decision;
       if (!dayInfo.isWorking || dayInfo.isBlocked) {
