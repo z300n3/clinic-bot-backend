@@ -57,27 +57,51 @@ async function validateExtracted(extracted, clinic, patient, stateData, userMess
     }
   }
 
-  // 4. FAQ answer or Schedule Summary
-  if (extracted.faq_topic === 'absence') {
-    if (result.dayInfo) {
-      result.specificDayInfo = result.dayInfo;
-    } else {
-      result.absenceSummary = await getAbsenceSummary(clinic.id);
-    }
-  } else if (extracted.faq_topic === 'hours') {
-    if (result.dayInfo) {
-      result.specificDayInfo = result.dayInfo;
-    } else {
-      result.scheduleSummary = await getDynamicScheduleSummary(clinic.id);
-    }
-  } else if (extracted.faq_topic || extracted.intent === 'inquiry') {
-    if (extracted.faq_topic === 'price' && clinic.consultation_price) {
-      result.directAnswer = `سعر الكشفية ${clinic.consultation_price} دينار 😊`;
-    } else if (extracted.faq_topic === 'location' && clinic.address) {
-      result.directAnswer = `عنوان العيادة: ${clinic.address} 📍`;
-    } else {
-      const faq = await searchFAQ(clinic.id, userMessage);
-      result.faqAnswer = faq.found ? faq.answer : null;
+  // 4. Inquiry answer — from clinic fields or FAQ
+  if (extracted.faq_topic || extracted.intent === 'inquiry') {
+    const topic = extracted.faq_topic;
+
+    switch (topic) {
+      case 'absence':
+        if (result.dayInfo) {
+          result.specificDayInfo = result.dayInfo;
+        } else {
+          result.absenceSummary = await getAbsenceSummary(clinic.id);
+        }
+        break;
+
+      case 'hours':
+        if (result.dayInfo) {
+          result.specificDayInfo = result.dayInfo;
+        } else {
+          result.scheduleSummary = await getDynamicScheduleSummary(clinic.id);
+        }
+        break;
+
+      case 'price':
+        result.directAnswer = clinic.consultation_price
+          ? `سعر الكشفية ${clinic.consultation_price} دينار 😊`
+          : 'سعر الكشفية غير محدد حالياً، تواصل مع العيادة للاستفسار.';
+        break;
+
+      case 'location':
+        result.directAnswer = clinic.address
+          ? `عنوان العيادة: ${clinic.address} 📍${clinic.map_link ? '\n' + clinic.map_link : ''}`
+          : 'العنوان غير محدد، تواصل مع العيادة.';
+        break;
+
+      case 'specialty':
+      case 'services':
+        result.directAnswer = clinic.specialty
+          ? `الدكتور ${clinic.doctor_name || 'المختص'} اختصاصه ${clinic.specialty}. للحالات ضمن هذا الاختصاص تكدر تحجز موعد 😊`
+          : `تكدر تحجز موعد والدكتور يشوف حالتك.`;
+        break;
+
+      case 'custom':
+      default:
+        const faq = await searchFAQ(clinic.id, userMessage);
+        result.faqAnswer = faq.found ? faq.answer : null;
+        break;
     }
   }
 
