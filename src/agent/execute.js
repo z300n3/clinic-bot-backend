@@ -114,8 +114,7 @@ async function execute(decision, clinic, patient, patientPhone) {
     }
 
     case 'SHIFT_ENDED': {
-      const { dayInfo } = decision;
-      return `انتهى دوام اليوم. تكدر تحجز ليوم ثاني؟`;
+      return 'انتهى دوام العيادة اليوم 🕐\nتكدر تحجز ليوم ثاني؟ قولي أي يوم يناسبك.';
     }
 
     case 'DAY_FULL': {
@@ -138,78 +137,86 @@ async function execute(decision, clinic, patient, patientPhone) {
 }
 
 async function doBooking(decision, clinic, patient) {
-  const { extracted, dayInfo } = decision;
-  const now = getBaghdadNow();
+  try {
+    if (!decision.dayInfo || !decision.dayInfo.targetDay) {
+      return 'أحتاج تحديد اليوم المطلوب للحجز. أي يوم يناسبك؟';
+    }
+    const { extracted, dayInfo } = decision;
+    const now = getBaghdadNow();
 
-  const targetDay = dayjs(dayInfo.targetDay).tz(TIMEZONE);
-  const dayStartISO = targetDay.toISOString();
-  const dayEndISO   = targetDay.endOf('day').toISOString();
+    const targetDay = dayjs(dayInfo.targetDay).tz(TIMEZONE);
+    const dayStartISO = targetDay.toISOString();
+    const dayEndISO   = targetDay.endOf('day').toISOString();
 
-  const { data: bookedAppts } = await supabase
-    .from('appointments').select('id')
-    .eq('clinic_id', clinic.id)
-    .in('status', ['scheduled','confirmed'])
-    .gte('scheduled_at', dayStartISO)
-    .lte('scheduled_at', dayEndISO);
+    const { data: bookedAppts } = await supabase
+      .from('appointments').select('id')
+      .eq('clinic_id', clinic.id)
+      .in('status', ['scheduled','confirmed'])
+      .gte('scheduled_at', dayStartISO)
+      .lte('scheduled_at', dayEndISO);
 
-  const booked      = (bookedAppts || []).length;
-  const queueNumber = booked + 1;
-  const duration    = clinic.appointment_duration_minutes || 30;
-  const scheduledAt = targetDay.hour(BOOKING_HOUR).minute(0).second(0).millisecond(0);
+    const booked      = (bookedAppts || []).length;
+    const queueNumber = booked + 1;
+    const duration    = clinic.appointment_duration_minutes || 30;
+    const scheduledAt = targetDay.hour(BOOKING_HOUR).minute(0).second(0).millisecond(0);
 
-  // Estimated time
-  const shift = dayInfo.shifts?.[0];
-  let estimatedLine = '';
-  let workHoursLine = '';
-  if (shift?.open) {
-    const [sh, sm] = shift.open.split(':').map(Number);
-    const estimated = targetDay.hour(sh).minute(sm || 0)
-      .add((queueNumber - 1) * duration, 'minute');
-    estimatedLine = `⏰ وقتك التقريبي: ${formatTime12(estimated.format('HH:mm'))}`;
-    const openFmt  = formatTime12(shift.open);
-    const closeFmt = shift.close ? ` — ${formatTime12(shift.close)}` : '';
-    workHoursLine  = `🕐 دوام العيادة: ${openFmt}${closeFmt}`;
+    // Estimated time
+    const shift = dayInfo.shifts?.[0];
+    let estimatedLine = '';
+    let workHoursLine = '';
+    if (shift?.open) {
+      const [sh, sm] = shift.open.split(':').map(Number);
+      const estimated = targetDay.hour(sh).minute(sm || 0)
+        .add((queueNumber - 1) * duration, 'minute');
+      estimatedLine = `⏰ وقتك التقريبي: ${formatTime12(estimated.format('HH:mm'))}`;
+      const openFmt  = formatTime12(shift.open);
+      const closeFmt = shift.close ? ` — ${formatTime12(shift.close)}` : '';
+      workHoursLine  = `🕐 دوام العيادة: ${openFmt}${closeFmt}`;
+    }
+
+    const servedBy = dayInfo.substitute || null;
+
+    const { data: appt, error } = await supabase
+      .from('appointments')
+      .insert({
+        clinic_id:        clinic.id,
+        patient_id:       patient.id,
+        scheduled_at:     scheduledAt.toISOString(),
+        duration_minutes: duration,
+        queue_number:     queueNumber,
+        status:           'scheduled',
+        reason:           extracted.reason,
+        patient_name:     extracted.patient_name,
+        served_by:        servedBy,
+      })
+      .select('id').single();
+
+    if (error) {
+      logger.error('[Execute] Booking insert failed', { error: error.message });
+      return 'فشل حفظ الموعد. حاول مرة ثانية أو تواصل معنا مباشرة.';
+    }
+
+    const ref = appt.id.slice(-6).toUpperCase();
+    const substituteNote = servedBy
+      ? `⚠️ ملاحظة: ${clinic.doctor_name} غائب هذا اليوم. البديل: ${servedBy}`
+      : null;
+
+    return [
+      'تم تثبيت موعدك بنجاح! ✅',
+      `📅 ${dayInfo.displayDate}`,
+      substituteNote,
+      `🎫 رقمك بالدور: ${queueNumber}`,
+      estimatedLine || null,
+      workHoursLine || null,
+      `👤 ${extracted.patient_name}`,
+      `📝 ${extracted.reason}`,
+      `رقم الحجز: #${ref}`,
+      'راجع العيادة بهذا اليوم وبيكون دورك حسب رقمك.',
+    ].filter(Boolean).join('\n');
+  } catch (err) {
+    logger.error('[Execute] doBooking error', { error: err.message });
+    return 'صار خطأ بالحجز. حاول مرة ثانية أو تواصل معنا مباشرة.';
   }
-
-  const servedBy = dayInfo.substitute || null;
-
-  const { data: appt, error } = await supabase
-    .from('appointments')
-    .insert({
-      clinic_id:        clinic.id,
-      patient_id:       patient.id,
-      scheduled_at:     scheduledAt.toISOString(),
-      duration_minutes: duration,
-      queue_number:     queueNumber,
-      status:           'scheduled',
-      reason:           extracted.reason,
-      patient_name:     extracted.patient_name,
-      served_by:        servedBy,
-    })
-    .select('id').single();
-
-  if (error) {
-    logger.error('[Execute] Booking insert failed', { error: error.message });
-    return 'فشل حفظ الموعد. حاول مرة ثانية أو تواصل معنا مباشرة.';
-  }
-
-  const ref = appt.id.slice(-6).toUpperCase();
-  const substituteNote = servedBy
-    ? `⚠️ ملاحظة: ${clinic.doctor_name} غائب هذا اليوم. البديل: ${servedBy}`
-    : null;
-
-  return [
-    'تم تثبيت موعدك بنجاح! ✅',
-    `📅 ${dayInfo.displayDate}`,
-    substituteNote,
-    `🎫 رقمك بالدور: ${queueNumber}`,
-    estimatedLine || null,
-    workHoursLine || null,
-    `👤 ${extracted.patient_name}`,
-    `📝 ${extracted.reason}`,
-    `رقم الحجز: #${ref}`,
-    'راجع العيادة بهذا اليوم وبيكون دورك حسب رقمك.',
-  ].filter(Boolean).join('\n');
 }
 
 module.exports = { execute };

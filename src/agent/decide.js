@@ -54,6 +54,10 @@ function decide(extracted, checks, currentState, stateData) {
     if (missing.length > 0)
       return { action: 'ASK_MISSING', fields: missing };
 
+    // Only check dayInfo if we have a date
+    if (!checks.dayInfo)
+      return { action: 'ASK_MISSING', fields: ['اليوم المطلوب للحجز'] };
+
     // Name must be two words
     if (!checks.nameValid)
       return { action: 'ASK_FULL_NAME' };

@@ -37,7 +37,7 @@ async function validateExtracted(extracted, clinic, patient, stateData) {
   }
 
   // 3. Check day availability
-  if (extracted.date_preference && extracted.intent === 'booking') {
+  if (extracted.date_preference && String(extracted.date_preference).toLowerCase() !== 'null' && extracted.intent === 'booking') {
     result.dayInfo = await checkDayInfo(extracted.date_preference, clinic);
   }
 
@@ -120,10 +120,15 @@ async function checkDayInfo(datePreference, clinic) {
   // Check if today's shift ended
   const shift0 = shifts[0];
   let shiftEnded = false;
-  if (dateStr === now.format('YYYY-MM-DD') && shift0?.close) {
-    const [ch, cm] = shift0.close.split(':').map(Number);
-    const shiftClose = targetDay.hour(ch).minute(cm);
-    shiftEnded = !now.isBefore(shiftClose);
+  if (dateStr === now.format('YYYY-MM-DD')) {
+    if (!shift0?.close) {
+      shiftEnded = false;
+    } else {
+      const [ch, cm] = shift0.close.split(':').map(Number);
+      const shiftCloseMinutes = ch * 60 + cm;
+      const nowMinutes = now.hour() * 60 + now.minute();
+      shiftEnded = nowMinutes >= shiftCloseMinutes;
+    }
   }
 
   return {
