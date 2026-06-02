@@ -31,7 +31,7 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
   logger.info('[Pipeline] Extracted', { intent: extracted.intent });
 
   // 4. Validate
-  const checks = await validateExtracted(extracted, clinic, patient, stateData);
+  const checks = await validateExtracted(extracted, clinic, patient, stateData, userMessage);
   logger.info('[Pipeline] Validated', { nameValid: checks.nameValid, dayAvail: checks.dayInfo?.isWorking });
 
   // 5. Decide

@@ -3,7 +3,7 @@ const { getBaghdadNow, TIMEZONE, dayjs } = require('../utils/time');
 const { searchFAQ, getDynamicScheduleSummary, getAbsenceSummary } = require('./tools');
 const logger = require('../utils/logger');
 
-async function validateExtracted(extracted, clinic, patient, stateData) {
+async function validateExtracted(extracted, clinic, patient, stateData, userMessage) {
   // Merge partial booking context if available
   if (['awaiting_date', 'awaiting_info'].includes(stateData.booking_substate) && stateData.partial_booking) {
     if (!extracted.patient_name && stateData.partial_booking.patient_name) {
@@ -21,6 +21,7 @@ async function validateExtracted(extracted, clinic, patient, stateData) {
     faqAnswer:      null,
     scheduleSummary:null,
     absenceSummary: null,
+    specificDayInfo:null,
     upcomingAppts:  [],
   };
 
@@ -49,17 +50,27 @@ async function validateExtracted(extracted, clinic, patient, stateData) {
   }
 
   // 3. Check day availability
-  if (extracted.date_preference && String(extracted.date_preference).toLowerCase() !== 'null' && extracted.intent === 'booking') {
-    result.dayInfo = await checkDayInfo(extracted.date_preference, clinic);
+  if (extracted.date_preference && String(extracted.date_preference).toLowerCase() !== 'null') {
+    if (extracted.intent === 'booking' || extracted.faq_topic === 'absence' || extracted.faq_topic === 'hours') {
+      result.dayInfo = await checkDayInfo(extracted.date_preference, clinic);
+    }
   }
 
   // 4. FAQ answer or Schedule Summary
   if (extracted.faq_topic === 'absence') {
-    result.absenceSummary = await getAbsenceSummary(clinic.id);
+    if (result.dayInfo) {
+      result.specificDayInfo = result.dayInfo;
+    } else {
+      result.absenceSummary = await getAbsenceSummary(clinic.id);
+    }
   } else if (extracted.faq_topic === 'hours') {
-    result.scheduleSummary = await getDynamicScheduleSummary(clinic.id);
+    if (result.dayInfo) {
+      result.specificDayInfo = result.dayInfo;
+    } else {
+      result.scheduleSummary = await getDynamicScheduleSummary(clinic.id);
+    }
   } else if (extracted.faq_topic || extracted.intent === 'inquiry') {
-    const searchTerm = extracted.faq_topic || extracted.date_preference || '';
+    const searchTerm = extracted.faq_topic === 'general_faq' ? userMessage : (extracted.faq_topic || extracted.date_preference || userMessage);
     const faq = await searchFAQ(clinic.id, searchTerm);
     result.faqAnswer = faq.found ? faq.answer : null;
   }

@@ -805,14 +805,14 @@ async function getDynamicScheduleSummary(clinicId) {
 
     if (block) {
       if (block.substitute_doctor_name) {
-        scheduleText += `\n   ⚠️ (ملاحظة: الدكتور الأساسي غائب وسيتواجد دكتور بديل: ${block.substitute_doctor_name})`;
+        scheduleText += ` (⚠️ البديل: ${block.substitute_doctor_name})`;
       } else {
-        scheduleText = "مغلق (إجازة/غياب الدكتور)";
+        scheduleText = "مغلق (إجازة/غياب)";
       }
     }
 
     let prefix = i === 0 ? "اليوم " : i === 1 ? "غداً " : "";
-    lines.push(`🔹 *${prefix}${displayDate}:*\n   ${scheduleText}`);
+    lines.push(`🔹 *${prefix}${displayDate}:* ${scheduleText}`);
   }
 
   return lines.join('\n\n');
@@ -822,43 +822,68 @@ async function getAbsenceSummary(clinicId) {
   const now = getBaghdadNow();
   const next7DaysEnd = now.add(7, 'day').endOf('day');
 
-  const { data: blocks } = await supabase
-    .from('blocked_periods')
-    .select('start_at, end_at, is_full_day, reason, substitute_doctor_name')
-    .eq('clinic_id', clinicId)
-    .lte('start_at', next7DaysEnd.toISOString())
-    .gte('end_at', now.startOf('day').toISOString());
+  const [blocksRes, schedulesRes] = await Promise.all([
+    supabase
+      .from('blocked_periods')
+      .select('start_at, end_at, is_full_day, reason, substitute_doctor_name')
+      .eq('clinic_id', clinicId)
+      .lte('start_at', next7DaysEnd.toISOString())
+      .gte('end_at', now.startOf('day').toISOString()),
+    supabase
+      .from('availability_schedules')
+      .select('*')
+      .eq('clinic_id', clinicId)
+  ]);
 
-  if (!blocks || blocks.length === 0) {
-    return "لا توجد أي إجازات أو غيابات مجدولة للدكتور خلال الأيام القادمة، الدوام مستمر بشكل طبيعي. 😊";
-  }
+  const blocks = blocksRes.data || [];
+  const schedules = schedulesRes.data || [];
 
   const daysAr = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
   let lines = [];
-  lines.push("⚠️ *معلومات غياب الدكتور للأيام القادمة:*\n");
+  
+  // Track if we found any absence
+  let hasAbsence = false;
 
-  // We only show days that have blocks
   for (let i = 0; i < 7; i++) {
     const targetDay = now.add(i, 'day');
+    const dayOfWeek = targetDay.day();
     const targetStartISO = targetDay.startOf('day').toISOString();
     const targetEndISO = targetDay.endOf('day').toISOString();
+    const displayDate = `${daysAr[dayOfWeek]} (${targetDay.format('DD/MM')})`;
 
+    // Check schedule first
+    let isWorking = false;
+    const generalSched = schedules.find(s => s.day_of_week === dayOfWeek && s.specific_date === null);
+    const specificSched = schedules.find(s => s.specific_date === targetDay.format('YYYY-MM-DD'));
+    const activeSched = specificSched || generalSched;
+
+    if (activeSched && activeSched.is_working_day) {
+      isWorking = true;
+    }
+
+    // Check blocks
     const block = blocks.find(b => b.start_at < targetEndISO && b.end_at > targetStartISO);
     
-    if (block) {
-      const dayOfWeek = targetDay.day();
-      const displayDate = `${daysAr[dayOfWeek]} (${targetDay.format('DD/MM')})`;
+    if (!isWorking && !block) {
+      lines.push(`🔹 *${displayDate}:* عطلة العيادة المعتادة (مغلق)`);
+      hasAbsence = true;
+    } else if (block) {
       let note = "";
       if (block.substitute_doctor_name) {
-        note = `الدكتور الأساسي غائب وسيتواجد دكتور بديل: *${block.substitute_doctor_name}*`;
+        note = `الدكتور الأساسي غائب (البديل: *${block.substitute_doctor_name}*)`;
       } else {
         note = "العيادة مغلقة (إجازة/غياب الدكتور)";
       }
-      lines.push(`🔹 *${displayDate}*:\n   ${note}`);
+      lines.push(`🔹 *${displayDate}:* ⚠️ ${note}`);
+      hasAbsence = true;
     }
   }
 
-  return lines.join('\n\n');
+  if (!hasAbsence) {
+    return "لا توجد أي إجازات أو غيابات مجدولة للدكتور خلال الأيام القادمة، الدوام مستمر بشكل طبيعي. 😊";
+  }
+
+  return "⚠️ *أيام إجازات وغياب الدكتور للأيام السبعة القادمة:*\n\n" + lines.join('\n');
 }
 
 module.exports = { 

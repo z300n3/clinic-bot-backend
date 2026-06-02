@@ -18,6 +18,17 @@ async function execute(decision, clinic, patient, patientPhone) {
     case 'REPLY_FAQ':
       return decision.answer;
 
+    case 'REPLY_SPECIFIC_DAY': {
+      const { dayInfo } = decision;
+      if (!dayInfo.isWorking || dayInfo.isBlocked) {
+        return `🔹 بخصوص يوم ${dayInfo.displayDate}، العيادة ستكون مغلقة (عطلة/إجازة).`;
+      }
+      if (dayInfo.substitute) {
+        return `🔹 بخصوص يوم ${dayInfo.displayDate}، الدكتور الأساسي غائب وسيتواجد مكانه الطبيب البديل: ${dayInfo.substitute}.`;
+      }
+      return `🔹 نعم، بخصوص يوم ${dayInfo.displayDate}، الطبيب متواجد والدوام مستمر بشكل طبيعي.`;
+    }
+
     case 'REPLY_ABSENCE':
       return decision.summary;
 

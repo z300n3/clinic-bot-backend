@@ -27,6 +27,8 @@ function decide(extracted, checks, currentState, stateData) {
 
   // ── FAQ / Inquiry ─────────────────────────────────────────────────────────
   if (intent === 'inquiry') {
+    if (checks.specificDayInfo)
+      return { action: 'REPLY_SPECIFIC_DAY', dayInfo: checks.specificDayInfo };
     if (checks.absenceSummary)
       return { action: 'REPLY_ABSENCE', summary: checks.absenceSummary };
     if (checks.scheduleSummary)
