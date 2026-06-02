@@ -27,6 +27,8 @@ function decide(extracted, checks, currentState, stateData) {
 
   // ── FAQ / Inquiry ─────────────────────────────────────────────────────────
   if (intent === 'inquiry') {
+    if (checks.scheduleSummary)
+      return { action: 'REPLY_SCHEDULE', summary: checks.scheduleSummary };
     if (checks.faqAnswer)
       return { action: 'REPLY_FAQ', answer: checks.faqAnswer };
     return { action: 'REPLY_CONTACT_CLINIC' };

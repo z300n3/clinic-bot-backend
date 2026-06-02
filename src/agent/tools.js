@@ -736,10 +736,93 @@ function extractKeywords(text) {
     .slice(0, 5);
 }
 
+async function getDynamicScheduleSummary(clinicId) {
+  const now = getBaghdadNow();
+  const next7DaysEnd = now.add(7, 'day').endOf('day');
+
+  const [schedulesRes, blocksRes] = await Promise.all([
+    supabase
+      .from('availability_schedules')
+      .select('day_of_week, specific_date, is_working_day, shifts')
+      .eq('clinic_id', clinicId),
+    supabase
+      .from('blocked_periods')
+      .select('start_at, end_at, is_full_day, reason, substitute_doctor_name, substitute_doctor_note')
+      .eq('clinic_id', clinicId)
+      .lte('start_at', next7DaysEnd.toISOString())
+      .gte('end_at', now.startOf('day').toISOString())
+  ]);
+
+  const schedules = schedulesRes.data || [];
+  const blocks = blocksRes.data || [];
+
+  const daysAr = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+  let lines = [];
+  lines.push("أوقات الدوام للعيادة خلال الأيام القادمة:");
+
+  for (let i = 0; i < 7; i++) {
+    const targetDay = now.add(i, 'day');
+    const dayOfWeek = targetDay.day(); // 0 is Sunday
+    const dateStr = targetDay.format('YYYY-MM-DD');
+    const displayDate = `${daysAr[dayOfWeek]} (${targetDay.format('DD/MM')})`;
+
+    // Get basic schedule
+    let isWorking = false;
+    let shifts = [];
+    
+    // First specific date, then day of week
+    const specificSchedule = schedules.find(s => s.specific_date === dateStr);
+    if (specificSchedule) {
+      isWorking = specificSchedule.is_working_day;
+      shifts = specificSchedule.shifts || [];
+    } else {
+      const defaultSchedule = schedules.find(s => s.day_of_week === dayOfWeek && !s.specific_date);
+      if (defaultSchedule) {
+        isWorking = defaultSchedule.is_working_day;
+        shifts = defaultSchedule.shifts || [];
+      }
+    }
+
+    // Format shifts
+    let scheduleText = "";
+    if (!isWorking || shifts.length === 0) {
+      scheduleText = "عطلة / مغلق";
+    } else {
+      scheduleText = shifts.map(sh => {
+        let op = formatTime12(sh.open);
+        let cl = formatTime12(sh.close);
+        // Clean leading zero
+        op = op.replace(/^0/, '');
+        cl = cl.replace(/^0/, '');
+        return `من ${op} لـ ${cl}`;
+      }).join(' و ');
+    }
+
+    // Check blocks
+    const targetStartISO = targetDay.startOf('day').toISOString();
+    const targetEndISO = targetDay.endOf('day').toISOString();
+    const block = blocks.find(b => b.start_at < targetEndISO && b.end_at > targetStartISO);
+
+    if (block) {
+      if (block.substitute_doctor_name) {
+        scheduleText += ` (ملاحظة: الدكتور الأساسي غائب وسيتواجد دكتور بديل: ${block.substitute_doctor_name})`;
+      } else {
+        scheduleText = "مغلق (إجازة/غياب الدكتور)";
+      }
+    }
+
+    let prefix = i === 0 ? "اليوم " : i === 1 ? "غداً " : "";
+    lines.push(`- ${prefix}${displayDate}: ${scheduleText}`);
+  }
+
+  return lines.join('\\n');
+}
+
 module.exports = { 
   toolDefinitions, 
   executeTool, 
   searchFAQ,
   getDayConfig,
-  parseArabicDatePreference
+  parseArabicDatePreference,
+  getDynamicScheduleSummary
 };

@@ -18,6 +18,9 @@ async function execute(decision, clinic, patient, patientPhone) {
     case 'REPLY_FAQ':
       return decision.answer;
 
+    case 'REPLY_SCHEDULE':
+      return decision.summary;
+
     case 'REPLY_CONTACT_CLINIC':
       return 'ما عندي معلومة عن هذا الموضوع، تواصل مع العيادة مباشرة للاستفسار.';
 
