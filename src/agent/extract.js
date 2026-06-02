@@ -93,6 +93,11 @@ async function extractIntent(userMessage, currentState, stateData) {
     
     clean = clean.replace(/```json|```/g, '').trim();
     
+    if (!clean) {
+      logger.warn('[Extract] Empty AI response', { userMessage });
+      return { intent: 'unclear', patient_name: null, date_preference: null, reason: null, faq_topic: null };
+    }
+
     try {
       const parsed = JSON.parse(clean);
       logger.debug('[Extract]', parsed);
