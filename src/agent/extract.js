@@ -79,7 +79,9 @@ async function extractIntent(userMessage, currentState, stateData) {
   * absence: إذا سأل عن غياب الدكتور أو إجازته أو الطبيب البديل.
   * services: أي سؤال عن الخدمات المتوفرة في العيادة.
   * custom: أي سؤال عام عن العيادة لا يندرج تحت التصنيفات السابقة.
-- ملاحظة هامة: إذا كانت الحالة الحالية (awaiting_info أو awaiting_date) وأرسل المريض نصاً قصيراً، افترض أنه يجيب على سؤال لإكمال الحجز (مثلاً إذا أرسل اسماً ضعه في patient_name، وإذا أرسل موعداً ضعه في date_preference، وإذا أرسل عرضاً مرضياً ضعه في reason)، واعطِ intent قيمة "booking".`
+- ملاحظة هامة جداً: إذا كانت الحالة الحالية (awaiting_info أو awaiting_date):
+  1. أولاً، تأكد ما إذا كانت الرسالة سؤالاً استفسارياً واضحاً (عن السعر، المكان، الاختصاص، الخ). إذا كانت كذلك، اجعل intent = "inquiry" واستخرج faq_topic المناسب.
+  2. ثانياً، إذا لم تكن سؤالاً بل نصاً قصيراً (اسم، يوم، شكوى مرضية)، افترض أنه إجابة لإكمال الحجز، واجعل intent = "booking" وقم بتعبئة الحقول (patient_name, date_preference, reason).`
 
   try {
     const response = await client.chat.completions.create({
