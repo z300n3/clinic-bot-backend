@@ -51,7 +51,10 @@ async function execute(decision, clinic, patient, patientPhone) {
         }
       });
       const fields = decision.fields.join(' و ');
-      return `أحتاج منك ${fields} لإكمال الحجز 😊`;
+      let msg = '';
+      if (decision.answer) msg += decision.answer + '\n\n---\n\n';
+      msg += `أحتاج منك ${fields} لإكمال الحجز 😊`;
+      return msg;
     }
 
     case 'ASK_FULL_NAME': {
@@ -62,7 +65,10 @@ async function execute(decision, clinic, patient, patientPhone) {
           reason:       decision.extracted?.reason || null,
         }
       });
-      return 'أحتاج الاسم الثنائي على الأقل (مثال: علي حسن). تفضل؟';
+      let msg = '';
+      if (decision.answer) msg += decision.answer + '\n\n---\n\n';
+      msg += `عذراً، أحتاج منك كتابة الاسم الثنائي (الاسم الأول واسم الأب) لتسجيل الحجز بشكل صحيح.`;
+      return msg;
     }
 
     case 'NO_APPOINTMENTS':

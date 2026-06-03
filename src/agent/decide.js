@@ -65,15 +65,15 @@ function decide(extracted, checks, currentState, stateData) {
     if (!extracted.reason)          missing.push('سبب الزيارة');
 
     if (missing.length > 0)
-      return { action: 'ASK_MISSING', fields: missing, extracted };
+      return { action: 'ASK_MISSING', fields: missing, extracted, answer: checks.combinedAnswer };
 
     // Only check dayInfo if we have a date
     if (!checks.dayInfo)
-      return { action: 'ASK_MISSING', fields: ['اليوم المطلوب للحجز'], extracted };
+      return { action: 'ASK_MISSING', fields: ['اليوم المطلوب للحجز'], extracted, answer: checks.combinedAnswer };
 
     // Name must be two words
     if (!checks.nameValid)
-      return { action: 'ASK_FULL_NAME', extracted };
+      return { action: 'ASK_FULL_NAME', extracted, answer: checks.combinedAnswer };
 
     // Existing appointment with same name
     if (checks.existingAppt)
