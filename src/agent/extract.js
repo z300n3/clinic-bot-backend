@@ -50,7 +50,7 @@ async function extractIntent(userMessage, currentState, stateData) {
 رسالة المريض: "${userMessage}"
 
 {
-  "intent": "booking|cancellation|inquiry|check_appointment|greeting|unclear",
+  "intent": "booking (للحجز) | cancellation (لإلغاء الحجز) | inquiry (للاستفسار) | check_appointment (للسؤال عن مواعيدي وحجوزاتي) | greeting (ترحيب) | unclear (غير واضح)",
   "patient_name": "الاسم الكامل أو null — فقط إذا ذُكر صراحةً",
   "date_preference": "التاريخ أو اليوم أو null",
   "reason": "سبب الزيارة أو null",
