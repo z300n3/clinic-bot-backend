@@ -35,17 +35,7 @@ async function extractIntent(userMessage, currentState, stateData) {
     };
   }
 
-  // Fast-path: price
-  const priceRegex = /(سعر|شكد|شگد|كم|اجور|كلف|كشفية|الكشف|فلوس|مبلغ|ابيش|أبيش|بيش|باص)/i;
-  if (priceRegex.test(msg)) {
-    return { intent: 'inquiry', patient_name: null, date_preference: null, reason: null, faq_topic: 'price' };
-  }
-
-  // Fast-path: location
-  const locationRegex = /(وين|فين|عنوان|مكان|موقع|اوصل)/i;
-  if (locationRegex.test(msg)) {
-    return { intent: 'inquiry', patient_name: null, date_preference: null, reason: null, faq_topic: 'location' };
-  }
+  // Fast paths for price and location have been removed to support compound inquiries via LLM.
 
   // Fast-path: medical advice (reject immediately)
   const medicalRegex = /^.*(وصف|وصفلي|اعطني|شنو علاج|شنو دواء|كيف اعالج).*(دواء|علاج|حبوب)/i;

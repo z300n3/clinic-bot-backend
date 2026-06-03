@@ -13,6 +13,43 @@ function formatDayInfo(dayInfo) {
   return `🔹 نعم، بخصوص يوم ${dayInfo.displayDate}، الطبيب متواجد والدوام مستمر بشكل طبيعي.`;
 }
 
+async function buildHoursAnswer(clinic) {
+  const dayNames = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+
+  // Try availability_schedules first
+  const { data: schedules } = await supabase
+    .from('availability_schedules')
+    .select('day_of_week, is_working_day, shifts')
+    .eq('clinic_id', clinic.id)
+    .is('specific_date', null)
+    .order('day_of_week', { ascending: true });
+
+  if (schedules && schedules.length > 0) {
+    const lines = schedules.map(s => {
+      const name = dayNames[s.day_of_week];
+      if (!s.is_working_day) return `${name}: مغلق`;
+      const shift = (s.shifts || [])[0];
+      if (!shift) return `${name}: مغلق`;
+      return `${name}: ${shift.open} - ${shift.close}`;
+    });
+    return `🕐 أوقات الدوام:\n${lines.join('\n')}`;
+  }
+
+  // Fallback to clinic.working_hours JSONB
+  const wh = clinic.working_hours || {};
+  const order = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+  const arabicKeys = {
+    sunday: 'الأحد', monday: 'الاثنين', tuesday: 'الثلاثاء',
+    wednesday: 'الأربعاء', thursday: 'الخميس', friday: 'الجمعة', saturday: 'السبت'
+  };
+  const lines = order.map(key => {
+    const conf = wh[key];
+    if (!conf || conf.closed) return `${arabicKeys[key]}: مغلق`;
+    return `${arabicKeys[key]}: ${conf.open || '09:00'} - ${conf.close || '17:00'}`;
+  });
+  return `🕐 أوقات الدوام:\n${lines.join('\n')}`;
+}
+
 async function validateExtracted(extracted, clinic, patient, stateData, userMessage) {
   // Merge partial booking context if available
   if (['awaiting_date', 'awaiting_info'].includes(stateData.booking_substate) && stateData.partial_booking) {
@@ -65,7 +102,7 @@ async function validateExtracted(extracted, clinic, patient, stateData, userMess
   if (Array.isArray(extracted.faq_topics)) {
     parsedTopics = extracted.faq_topics;
   } else if (typeof extracted.faq_topics === 'string') {
-    parsedTopics = [extracted.faq_topics];
+    parsedTopics = extracted.faq_topics.split(',').map(s => s.trim());
   }
 
   // 3. Check day availability
@@ -98,8 +135,7 @@ async function validateExtracted(extracted, clinic, patient, stateData, userMess
           if (result.dayInfo) {
             combinedAnswers.push(formatDayInfo(result.dayInfo));
           } else {
-            const sum = await getDynamicScheduleSummary(clinic.id);
-            if (sum) combinedAnswers.push(sum);
+            combinedAnswers.push(await buildHoursAnswer(clinic));
           }
           break;
 
