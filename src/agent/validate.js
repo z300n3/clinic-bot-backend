@@ -60,22 +60,28 @@ async function validateExtracted(extracted, clinic, patient, stateData, userMess
     result.existingAppt = data || null;
   }
 
+  // Extract topics robustly
+  let parsedTopics = [];
+  if (Array.isArray(extracted.faq_topics)) {
+    parsedTopics = extracted.faq_topics;
+  } else if (typeof extracted.faq_topics === 'string') {
+    parsedTopics = [extracted.faq_topics];
+  }
+
   // 3. Check day availability
   if (extracted.date_preference && String(extracted.date_preference).toLowerCase() !== 'null') {
     const isBooking = extracted.intent === 'booking';
-    const topics = Array.isArray(extracted.faq_topics) ? extracted.faq_topics : [];
-    if (isBooking || topics.includes('absence') || topics.includes('hours')) {
+    if (isBooking || parsedTopics.includes('absence') || parsedTopics.includes('hours')) {
       result.dayInfo = await checkDayInfo(extracted.date_preference, clinic);
     }
   }
 
   // 4. Inquiry answer — from clinic fields or FAQ
-  const topics = Array.isArray(extracted.faq_topics) ? extracted.faq_topics : [];
-  if (topics.length > 0 || extracted.intent === 'inquiry') {
+  if (parsedTopics.length > 0 || extracted.intent === 'inquiry') {
     let combinedAnswers = [];
     
     // If the intent was inquiry but no topics were extracted, fallback to custom search
-    const activeTopics = topics.length > 0 ? topics : ['custom'];
+    const activeTopics = parsedTopics.length > 0 ? parsedTopics : ['custom'];
 
     for (const topic of activeTopics) {
       switch (topic) {
