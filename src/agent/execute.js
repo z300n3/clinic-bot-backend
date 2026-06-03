@@ -19,6 +19,7 @@ async function execute(decision, clinic, patient, patientPhone) {
       return decision.answer;
 
     case 'REPLY_DIRECT':
+    case 'REPLY_COMBINED':
       return decision.answer;
 
     case 'REPLY_SPECIFIC_DAY': {

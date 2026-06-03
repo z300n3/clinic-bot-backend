@@ -64,14 +64,14 @@ async function extractIntent(userMessage, currentState, stateData) {
   "patient_name": "الاسم الكامل أو null — فقط إذا ذُكر صراحةً",
   "date_preference": "التاريخ أو اليوم أو null",
   "reason": "سبب الزيارة أو null",
-  "faq_topic": "hours|absence|price|location|specialty|services|custom أو null"
+  "faq_topics": "مصفوفة (Array) تحتوي على موضوع أو أكثر من: hours, absence, price, location, specialty, services, custom. استخدم مصفوفة فارغة [] إذا لم يكن هناك سؤال."
 }
 
 قواعد:
 - patient_name: اسم شخص فقط (كلمة أو كلمتين تبدو كاسم). لا تضع جمل.
 - date_preference: أي إشارة زمنية (باجر، الخميس، هاي الأسبوع، اليوم...).
 - reason: الشكوى الطبية أو سبب الزيارة.
-- faq_topic: 
+- faq_topics: استخرج كل المواضيع المطلوبة إذا سأل المريض عدة أسئلة (مثال: ["location", "hours"]).
   * specialty: إذا سأل عن تخصص الطبيب، شنو يعالج، هل يعالج مرض كذا، أو الأمراض التي يعالجها.
   * price: حصراً إذا سأل عن مقدار السعر، كم الكشفية، أو التكلفة. إذا سأل عن (طرق الدفع، بطاقة، زين كاش، تأمين) فاختر custom.
   * location: أي سؤال عن العنوان/الموقع/كيف يوصل.
@@ -80,7 +80,7 @@ async function extractIntent(userMessage, currentState, stateData) {
   * services: أي سؤال عن الخدمات المتوفرة في العيادة.
   * custom: أي سؤال عام عن العيادة لا يندرج تحت التصنيفات السابقة.
 - ملاحظة هامة جداً: إذا كانت الحالة الحالية (awaiting_info أو awaiting_date):
-  1. أولاً، تأكد ما إذا كانت الرسالة سؤالاً استفسارياً واضحاً (عن السعر، المكان، الاختصاص، الخ). إذا كانت كذلك، اجعل intent = "inquiry" واستخرج faq_topic المناسب.
+  1. أولاً، تأكد ما إذا كانت الرسالة سؤالاً استفسارياً واضحاً (عن السعر، المكان، الاختصاص، الخ). إذا كانت كذلك، اجعل intent = "inquiry" واستخرج faq_topics المناسبة.
   2. ثانياً، إذا لم تكن سؤالاً بل نصاً قصيراً (اسم، يوم، شكوى مرضية)، افترض أنه إجابة لإكمال الحجز، واجعل intent = "booking" وقم بتعبئة الحقول (patient_name, date_preference, reason).`
 
   try {

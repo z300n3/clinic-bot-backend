@@ -27,6 +27,10 @@ function decide(extracted, checks, currentState, stateData) {
 
   // ── FAQ / Inquiry ─────────────────────────────────────────────────────────
   if (intent === 'inquiry') {
+    if (checks.combinedAnswer)
+      return { action: 'REPLY_COMBINED', answer: checks.combinedAnswer };
+    
+    // Fallbacks just in case
     if (checks.specificDayInfo)
       return { action: 'REPLY_SPECIFIC_DAY', dayInfo: checks.specificDayInfo };
     if (checks.absenceSummary)
@@ -37,6 +41,7 @@ function decide(extracted, checks, currentState, stateData) {
       return { action: 'REPLY_DIRECT', answer: checks.directAnswer };
     if (checks.faqAnswer)
       return { action: 'REPLY_FAQ', answer: checks.faqAnswer };
+      
     return { action: 'REPLY_CONTACT_CLINIC' };
   }
 

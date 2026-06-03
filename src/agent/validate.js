@@ -3,6 +3,16 @@ const { getBaghdadNow, TIMEZONE, dayjs } = require('../utils/time');
 const { searchFAQ, getDynamicScheduleSummary, getAbsenceSummary } = require('./tools');
 const logger = require('../utils/logger');
 
+function formatDayInfo(dayInfo) {
+  if (!dayInfo.isWorking || dayInfo.isBlocked) {
+    return `🔹 بخصوص يوم ${dayInfo.displayDate}، العيادة ستكون مغلقة (عطلة/إجازة).`;
+  }
+  if (dayInfo.substitute) {
+    return `🔹 بخصوص يوم ${dayInfo.displayDate}، الدكتور الأساسي غائب وسيتواجد مكانه الطبيب البديل: ${dayInfo.substitute}.`;
+  }
+  return `🔹 نعم، بخصوص يوم ${dayInfo.displayDate}، الطبيب متواجد والدوام مستمر بشكل طبيعي.`;
+}
+
 async function validateExtracted(extracted, clinic, patient, stateData, userMessage) {
   // Merge partial booking context if available
   if (['awaiting_date', 'awaiting_info'].includes(stateData.booking_substate) && stateData.partial_booking) {
@@ -52,63 +62,76 @@ async function validateExtracted(extracted, clinic, patient, stateData, userMess
 
   // 3. Check day availability
   if (extracted.date_preference && String(extracted.date_preference).toLowerCase() !== 'null') {
-    if (extracted.intent === 'booking' || extracted.faq_topic === 'absence' || extracted.faq_topic === 'hours') {
+    const isBooking = extracted.intent === 'booking';
+    const topics = Array.isArray(extracted.faq_topics) ? extracted.faq_topics : [];
+    if (isBooking || topics.includes('absence') || topics.includes('hours')) {
       result.dayInfo = await checkDayInfo(extracted.date_preference, clinic);
     }
   }
 
   // 4. Inquiry answer — from clinic fields or FAQ
-  if (extracted.faq_topic || extracted.intent === 'inquiry') {
-    const topic = extracted.faq_topic;
+  const topics = Array.isArray(extracted.faq_topics) ? extracted.faq_topics : [];
+  if (topics.length > 0 || extracted.intent === 'inquiry') {
+    let combinedAnswers = [];
+    
+    // If the intent was inquiry but no topics were extracted, fallback to custom search
+    const activeTopics = topics.length > 0 ? topics : ['custom'];
 
-    switch (topic) {
-      case 'absence':
-        if (result.dayInfo) {
-          result.specificDayInfo = result.dayInfo;
-        } else {
-          result.absenceSummary = await getAbsenceSummary(clinic.id);
-        }
-        break;
-
-      case 'hours':
-        if (result.dayInfo) {
-          result.specificDayInfo = result.dayInfo;
-        } else {
-          result.scheduleSummary = await getDynamicScheduleSummary(clinic.id);
-        }
-        break;
-
-      case 'price':
-        result.directAnswer = clinic.consultation_price
-          ? `سعر الكشفية ${clinic.consultation_price} دينار 😊`
-          : 'سعر الكشفية غير محدد حالياً، تواصل مع العيادة للاستفسار.';
-        break;
-
-      case 'location':
-        result.directAnswer = clinic.address
-          ? `عنوان العيادة: ${clinic.address} 📍${clinic.map_link ? '\n' + clinic.map_link : ''}`
-          : 'العنوان غير محدد، تواصل مع العيادة.';
-        break;
-
-      case 'specialty':
-      case 'services':
-        if (clinic.specialty) {
-          let ans = `الدكتور ${clinic.doctor_name || 'المختص'} اختصاصه ${clinic.specialty}.`;
-          if (clinic.treated_diseases) {
-            ans += `\nيعالج الحالات التالية: ${clinic.treated_diseases}`;
+    for (const topic of activeTopics) {
+      switch (topic) {
+        case 'absence':
+          if (result.dayInfo) {
+            combinedAnswers.push(formatDayInfo(result.dayInfo));
+          } else {
+            const sum = await getAbsenceSummary(clinic.id);
+            if (sum) combinedAnswers.push(sum);
           }
-          ans += `\nللحالات ضمن هذا الاختصاص تكدر تحجز موعد 😊`;
-          result.directAnswer = ans;
-        } else {
-          result.directAnswer = `تكدر تحجز موعد والدكتور يشوف حالتك.`;
-        }
-        break;
+          break;
 
-      case 'custom':
-      default:
-        const faq = await searchFAQ(clinic.id, userMessage);
-        result.faqAnswer = faq.found ? faq.answer : null;
-        break;
+        case 'hours':
+          if (result.dayInfo) {
+            combinedAnswers.push(formatDayInfo(result.dayInfo));
+          } else {
+            const sum = await getDynamicScheduleSummary(clinic.id);
+            if (sum) combinedAnswers.push(sum);
+          }
+          break;
+
+        case 'price':
+          combinedAnswers.push(clinic.consultation_price
+            ? `💵 سعر الكشفية ${clinic.consultation_price} دينار 😊`
+            : 'سعر الكشفية غير محدد حالياً، تواصل مع العيادة للاستفسار.');
+          break;
+
+        case 'location':
+          combinedAnswers.push(clinic.address
+            ? `📍 عنوان العيادة: ${clinic.address} ${clinic.map_link ? '\n' + clinic.map_link : ''}`
+            : 'العنوان غير محدد، تواصل مع العيادة.');
+          break;
+
+        case 'specialty':
+        case 'services':
+          if (clinic.specialty) {
+            let ans = `👨‍⚕️ الدكتور ${clinic.doctor_name || 'المختص'} اختصاصه ${clinic.specialty}.`;
+            if (clinic.treated_diseases) {
+              ans += `\nيعالج الحالات التالية: ${clinic.treated_diseases}`;
+            }
+            combinedAnswers.push(ans);
+          } else {
+            combinedAnswers.push(`تكدر تحجز موعد والدكتور يشوف حالتك.`);
+          }
+          break;
+
+        case 'custom':
+        default:
+          const faq = await searchFAQ(clinic.id, userMessage);
+          if (faq.found) combinedAnswers.push(faq.answer);
+          break;
+      }
+    }
+
+    if (combinedAnswers.length > 0) {
+      result.combinedAnswer = combinedAnswers.join('\n\n---\n\n');
     }
   }
 
