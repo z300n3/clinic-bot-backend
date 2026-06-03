@@ -79,7 +79,7 @@ async function extractIntent(userMessage, currentState, stateData) {
   try {
     const response = await client.chat.completions.create({
       model: MODEL,
-      max_tokens: 500,
+      max_tokens: 1024,
       response_format: { type: 'json_object' },
       messages: [{ role: 'user', content: prompt }]
     });
