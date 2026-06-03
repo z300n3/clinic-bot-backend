@@ -84,8 +84,38 @@ async function extractIntent(userMessage, currentState, stateData) {
       messages: [{ role: 'user', content: prompt }]
     });
 
-    const text = response.choices[0].message.content?.trim() || '';
-    
+    // ── تشخيص مفصّل لردود DeepSeek ──────────────────────────────────
+    const choice = response.choices[0];
+    const finishReason = choice.finish_reason;       // 'stop' | 'length' | 'content_filter' | null
+    const rawText = choice.message.content || '';
+    const usage = response.usage || {};
+
+    logger.info('[Extract] DeepSeek raw response', {
+      userMessage,
+      finishReason,
+      rawTextLength: rawText.length,
+      rawTextPreview: rawText.substring(0, 200),
+      promptTokens: usage.prompt_tokens,
+      completionTokens: usage.completion_tokens,
+      totalTokens: usage.total_tokens,
+      cacheHit: usage.prompt_cache_hit_tokens || 0,
+      cacheMiss: usage.prompt_cache_miss_tokens || 0
+    });
+
+    const text = rawText.trim();
+
+    // ── إذا الرد فارغ أو مقطوع ─────────────────────────────────────
+    if (!text) {
+      logger.error('[Extract] ❌ EMPTY RESPONSE from DeepSeek', {
+        userMessage,
+        finishReason,
+        possibleCause: finishReason === 'content_filter' ? 'تم حظر المحتوى من DeepSeek'
+          : finishReason === 'length' ? 'الرد تجاوز max_tokens'
+          : 'الخادم لم يُرجع شيئاً (timeout أو خطأ داخلي)'
+      });
+      return { intent: 'unclear', patient_name: null, date_preference: null, reason: null, faq_topic: null };
+    }
+
     // Extract JSON block even if there is surrounding text
     let clean = text;
     const jsonMatch = text.match(/\{[\s\S]*\}/);
@@ -96,20 +126,25 @@ async function extractIntent(userMessage, currentState, stateData) {
     clean = clean.replace(/```json|```/g, '').trim();
     
     if (!clean) {
-      logger.warn('[Extract] Empty AI response', { userMessage });
+      logger.error('[Extract] ❌ No JSON found in response', { userMessage, rawText: text });
       return { intent: 'unclear', patient_name: null, date_preference: null, reason: null, faq_topic: null };
     }
 
     try {
       const parsed = JSON.parse(clean);
-      logger.debug('[Extract]', parsed);
+      logger.info('[Extract] ✅ Parsed successfully', { userMessage, intent: parsed.intent, faq_topics: parsed.faq_topics });
       return parsed;
     } catch (parseErr) {
-      logger.error('[Extract] JSON Parse Error', { text, clean, error: parseErr.message });
+      logger.error('[Extract] ❌ JSON Parse Error', { userMessage, text, clean, error: parseErr.message });
       throw parseErr;
     }
   } catch (err) {
-    logger.error('[Extract] failed', { error: err.message });
+    logger.error('[Extract] ❌ API CALL FAILED', {
+      error: err.message,
+      code: err.code || 'N/A',
+      status: err.status || err.statusCode || 'N/A',
+      type: err.type || 'N/A'
+    });
     return { intent: 'unclear', patient_name: null, date_preference: null, reason: null, faq_topic: null };
   }
 }
