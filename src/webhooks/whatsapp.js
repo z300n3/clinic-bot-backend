@@ -6,8 +6,7 @@ const {
   getClinicByPhoneNumberId,
   findOrCreatePatient,
   saveMessage,
-  getConversationState,
-  upsertConversationState,
+  getConversationState
 } = require('../services/supabase');
 const { sendWhatsAppMessage, markMessageRead, sendTypingIndicator, downloadWhatsAppMedia, downloadAndStoreMedia } = require('../services/whatsapp');
 const { transcribeAudio } = require('../services/transcription');
@@ -212,49 +211,11 @@ async function processMessage({ phoneNumberId, from, profileName, messageId, tex
 
 // ── Phase 2: debounced (runs once per burst, with the combined text) ───────────
 
-// Keywords that mean the patient wants the bot to resume (booking/dismissal intent)
-const RESUME_KEYWORDS = [
-  'احجز', 'موعد', 'حجز', 'اريد', 'أريد', 'ابي', 'أبي',
-  'كلمني', 'ليس ميحتاج', 'ما ميحتاج', 'لا يهم', 'نسيت',
-];
-
-// Iraqi-Arabic positive/agreement phrases — must NEVER trigger doctor_pending
-// (kept here as a reference; the enforcement is in the system prompt)
-// "مو مشكلة", "لا مشكلة", "ماكو مشكلة", "تمام", "زين", "موافق" …
-
 async function processDebounced({ clinic, patient, phoneNumberId, from, combinedText }) {
-  // 1. Check conversation state
-  const state = await getConversationState(clinic.id, from);
-
-  if (state?.state === 'doctor_pending') {
-    // If patient sends a booking or dismissal keyword → auto-resume the bot
-    const wantsResume = RESUME_KEYWORDS.some((kw) => combinedText.includes(kw));
-
-    if (wantsResume) {
-      logger.info('Auto-resuming bot from doctor_pending', { from, trigger: combinedText.slice(0, 60) });
-      await upsertConversationState(clinic.id, from, 'active', {});
-      // Fall through — process normally with Claude
-    } else {
-      // Rate-limit the "received" reply: send it at most once every 5 minutes
-      const FIVE_MIN_MS    = 5 * 60 * 1000;
-      const lastReplyTime  = state.last_message_at ? new Date(state.last_message_at).getTime() : 0;
-      const shouldNotify   = (Date.now() - lastReplyTime) >= FIVE_MIN_MS;
-
-      if (shouldNotify) {
-        await upsertConversationState(clinic.id, from, 'doctor_pending', state.state_data);
-        await sendWhatsAppMessage(phoneNumberId, from, 'تم استلام رسالتك، فريق العيادة سيرد قريباً ⏳');
-      }
-      return;
-    }
-  }
-
-  // 2. Update state to active + touch last_message_at
-  await upsertConversationState(clinic.id, from, 'active', state?.state_data || {});
-
-  // 3. Show typing indicator so the patient knows the bot is working
+  // 1. Show typing indicator so the patient knows the bot is working
   sendTypingIndicator(phoneNumberId, from).catch(() => {});
 
-  // 4. Run AI agent with the combined (debounced) text
+  // 2. Run AI agent with the combined (debounced) text
   let reply;
   try {
     reply = await handleIncomingMessage({
