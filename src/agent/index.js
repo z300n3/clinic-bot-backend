@@ -26,7 +26,28 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
     return reply;
   }
 
-  // 3. Extract
+  // 3. GATE BYPASS (المريض يجيب على أسئلة الطبيب)
+  if (currentState === 'gate_collecting') {
+    // مخرج الطوارئ للإلغاء
+    if (/الغاء|إلغاء|خروج|رجوع|بطلت/i.test(userMessage)) {
+      await upsertConversationState(clinic.id, patientPhone, 'active', {});
+      const reply = 'تم إلغاء الطلب والتراجع. كيف أقدر أساعدك الآن؟';
+      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+      return reply;
+    }
+
+    // تمرير الإجابة مباشرة لملف execute (تجاوز الذكاء الاصطناعي)
+    const decision = { 
+      action: 'GATE_CONTINUE', 
+      step: stateData.escalation?.gate_step || 1, 
+      userMessage 
+    };
+    const reply = await execute(decision, clinic, patient, patientPhone);
+    await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+    return reply;
+  }
+
+  // 4. Extract
   const extracted = await extractIntent(userMessage, subState, stateData);
   extracted.userMessage = userMessage; // pass raw message for gate answers
   logger.info('[Pipeline] Extracted', { intent: extracted.intent });
@@ -51,15 +72,15 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
     return reply;
   }
 
-  // 4. Validate
+  // 5. Validate
   const checks = await validateExtracted(extracted, clinic, patient, stateData, userMessage);
   logger.info('[Pipeline] Validated', { nameValid: checks.nameValid, dayAvail: checks.dayInfo?.isWorking });
 
-  // 5. Decide
+  // 6. Decide
   const decision = decide(extracted, checks, subState, stateData);
   logger.info('[Pipeline] Decision', { action: decision.action });
 
-  // 6. Execute
+  // 7. Execute
   const reply = await execute(decision, clinic, patient, patientPhone);
 
   // 7. Save
