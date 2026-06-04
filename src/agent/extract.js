@@ -50,7 +50,7 @@ async function extractIntent(userMessage, currentState, stateData) {
   "reason": "سبب الزيارة أو null",
   "faq_topics": ["topic1", "topic2"] 
 }
-ملاحظة للـ faq_topics: استبدل ["topic1", "topic2"] بمصفوفة المواضيع المطلوبة من هذه القائمة (hours, absence, price, location, specialty, services, custom)، أو ضع مصفوفة فارغة [] إذا لم يكن هناك سؤال.
+ملاحظة للـ faq_topics: استبدل ["topic1", "topic2"] بمصفوفة المواضيع المطلوبة من هذه القائمة (hours, absence, price, location, specialty, services, about, doctor_name, custom)، أو ضع مصفوفة فارغة [] إذا لم يكن هناك سؤال.
 
 قواعد:
 - patient_name: اسم شخص فقط (كلمة أو كلمتين تبدو كاسم). لا تضع جمل.
@@ -63,6 +63,8 @@ async function extractIntent(userMessage, currentState, stateData) {
   * hours: أي سؤال عن الدوام/الأوقات/متى تفتح.
   * absence: إذا سأل عن غياب الدكتور أو إجازته أو الطبيب البديل.
   * services: أي سؤال عن الخدمات المتوفرة في العيادة.
+  * about: أي سؤال عام عن العيادة أو تفاصيلها أو شنو شغلها أو تعريف بالعيادة أو "عرفني عن العيادة".
+  * doctor_name: إذا سأل تحديداً عن اسم الطبيب أو الدكتور.
   * custom: أي سؤال عام عن العيادة لا يندرج تحت التصنيفات السابقة.
 - ملاحظة هامة جداً للأسئلة المزدوجة (حجز + استفسار):
   إذا احتوت الرسالة على طلب حجز وسؤال استفساري في نفس الوقت (مثل: "اريد حجز وكم السعر؟")، يجب أن تختار دائماً intent = "booking"، وتستخرج المواضيع المطلوبة وتضعها في faq_topics. إياك أن تختار "unclear" إذا كان هناك حجز واضح.

@@ -164,10 +164,40 @@ async function validateExtracted(extracted, clinic, patient, stateData, userMess
           }
           break;
 
+        case 'about': {
+          const lines = [`🏥 ${clinic.name}`];
+          if (clinic.doctor_name)  lines.push(`👨‍⚕️ الطبيب: ${clinic.doctor_name}`);
+          if (clinic.specialty)    lines.push(`🔬 التخصص: ${clinic.specialty}`);
+          if (clinic.treated_diseases) lines.push(`🩺 يعالج: ${clinic.treated_diseases}`);
+          if (clinic.consultation_price) lines.push(`💵 سعر الكشفية: ${clinic.consultation_price} دينار`);
+          if (clinic.address)      lines.push(`📍 العنوان: ${clinic.address}`);
+          if (clinic.map_link)     lines.push(`🗺️ الخارطة: ${clinic.map_link}`);
+          if (clinic.phone_number) lines.push(`📱 الهاتف: ${clinic.phone_number}`);
+          
+          const hoursText = await buildHoursAnswer(clinic);
+          if (hoursText) lines.push('', hoursText);
+          
+          lines.push('', 'إذا تريد تحجز موعد، قولي وأساعدك! 😊');
+          combinedAnswers.push(lines.join('\n'));
+          break;
+        }
+
+        case 'doctor_name':
+          combinedAnswers.push(
+            clinic.doctor_name
+              ? `👨‍⚕️ اسم الطبيب: ${clinic.doctor_name}${clinic.specialty ? ` — ${clinic.specialty}` : ''}`
+              : 'اسم الطبيب غير متوفر حالياً، تواصل مع العيادة للاستفسار.'
+          );
+          break;
+
         case 'custom':
         default:
           const faq = await searchFAQ(clinic.id, userMessage);
-          if (faq.found) combinedAnswers.push(faq.answer);
+          if (faq.found) {
+            combinedAnswers.push(faq.answer);
+          } else {
+            combinedAnswers.push('ما عندي جواب محدد على هالسؤال 😊\nبس أكدر أساعدك بـ: حجز موعد، أوقات الدوام، السعر، العنوان، أو التخصص.');
+          }
           break;
       }
     }
