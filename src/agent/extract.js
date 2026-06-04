@@ -1,12 +1,6 @@
-const OpenAI = require('openai');
+const { callAI } = require('../services/ai');
 const logger = require('../utils/logger');
-
-const client = new OpenAI({
-  apiKey:  process.env.OPENAI_APIDEEP_KEY,
-  baseURL: 'https://api.deepseek.com'
-});
-
-const MODEL = 'deepseek-v4-pro';
+const { trackTokenUsage } = require('../utils/tokenTracker');
 
 async function extractIntent(userMessage, currentState, stateData) {
   // Fast-path: detect confirmation/rejection without AI
@@ -50,7 +44,7 @@ async function extractIntent(userMessage, currentState, stateData) {
 رسالة المريض: "${userMessage}"
 
 {
-  "intent": "booking (للحجز) | cancellation (لإلغاء حجز محدد) | cancel_all (لإلغاء جميع حجوزاتي) | inquiry (للاستفسار) | check_appointment (للسؤال عن مواعيدي) | greeting (ترحيب) | unclear (غير واضح)",
+  "intent": "booking (للحجز) | cancellation (لإلغاء حجز محدد) | cancel_all (لإلغاء جميع حجوزاتي) | inquiry (للاستفسار) | check_appointment (للسؤال عن مواعيدي) | greeting (ترحيب) | escalate_to_doctor (يريد الطبيب / رفع تحليل / متابعة علاج) | unclear (غير واضح)",
   "patient_name": "الاسم الكامل أو null — فقط إذا ذُكر صراحةً",
   "date_preference": "التاريخ أو اليوم أو null",
   "reason": "سبب الزيارة أو null",
@@ -77,11 +71,9 @@ async function extractIntent(userMessage, currentState, stateData) {
   2. ثانياً، إذا لم تكن سؤالاً بل نصاً قصيراً (اسم، يوم، شكوى مرضية)، افترض أنه إجابة لإكمال الحجز أو إلغاء الموعد، واجعل intent = "booking" أو "cancellation" وقم بتعبئة الحقل المناسب (مثل patient_name).`
 
   try {
-    const response = await client.chat.completions.create({
-      model: MODEL,
+    const response = await callAI('flash', [{ role: 'user', content: prompt }], {
       max_tokens: 1024,
-      response_format: { type: 'json_object' },
-      messages: [{ role: 'user', content: prompt }]
+      response_format: { type: 'json_object' }
     });
 
     // ── تشخيص مفصّل لردود DeepSeek ──────────────────────────────────
@@ -113,6 +105,7 @@ async function extractIntent(userMessage, currentState, stateData) {
           : finishReason === 'length' ? 'الرد تجاوز max_tokens'
           : 'الخادم لم يُرجع شيئاً (timeout أو خطأ داخلي)'
       });
+      trackTokenUsage(userMessage, 'unclear', finishReason, usage, false);
       return { intent: 'unclear', patient_name: null, date_preference: null, reason: null, faq_topic: null };
     }
 
@@ -127,15 +120,18 @@ async function extractIntent(userMessage, currentState, stateData) {
     
     if (!clean) {
       logger.error('[Extract] ❌ No JSON found in response', { userMessage, rawText: text });
+      trackTokenUsage(userMessage, 'unclear', finishReason, usage, false);
       return { intent: 'unclear', patient_name: null, date_preference: null, reason: null, faq_topic: null };
     }
 
     try {
       const parsed = JSON.parse(clean);
       logger.info('[Extract] ✅ Parsed successfully', { userMessage, intent: parsed.intent, faq_topics: parsed.faq_topics });
+      trackTokenUsage(userMessage, parsed.intent, finishReason, usage, true);
       return parsed;
     } catch (parseErr) {
       logger.error('[Extract] ❌ JSON Parse Error', { userMessage, text, clean, error: parseErr.message });
+      trackTokenUsage(userMessage, 'unclear', finishReason, usage, false);
       throw parseErr;
     }
   } catch (err) {

@@ -97,6 +97,8 @@ async function markMessageRead(phoneNumberId, messageId) {
   }
 }
 
+const { supabase } = require('./supabase');
+
 /**
  * Download a WhatsApp media file and return it as a Buffer.
  *
@@ -129,4 +131,21 @@ async function downloadWhatsAppMedia(mediaId) {
   return Buffer.from(audioRes.data);
 }
 
-module.exports = { sendWhatsAppMessage, markMessageRead, sendTypingIndicator, downloadWhatsAppMedia };
+async function downloadAndStoreMedia(mediaId, clinicId, patientPhone) {
+  const buffer = await downloadWhatsAppMedia(mediaId);
+  const filename = `${clinicId}/${patientPhone}/${Date.now()}_${mediaId}.jpg`;
+
+  const { error } = await supabase.storage
+    .from('patient-media')
+    .upload(filename, buffer, { contentType: 'image/jpeg', upsert: false });
+
+  if (error) throw error;
+
+  const { data } = supabase.storage
+    .from('patient-media')
+    .getPublicUrl(filename);
+
+  return data.publicUrl;
+}
+
+module.exports = { sendWhatsAppMessage, markMessageRead, sendTypingIndicator, downloadWhatsAppMedia, downloadAndStoreMedia };

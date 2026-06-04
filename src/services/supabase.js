@@ -77,7 +77,7 @@ async function findOrCreatePatient(clinicId, phoneNumber, profileName) {
  * Atomically inserts a message row.
  * Returns null (not an error) when whatsapp_message_id already exists (dedup).
  */
-async function saveMessage({ clinicId, patientId, patientPhone, role, content, toolCalls, whatsappMessageId, messageType, originalMediaId }) {
+async function saveMessage({ clinicId, patientId, patientPhone, role, content, toolCalls, whatsappMessageId, messageType, originalMediaId, mediaUrl }) {
   const { data, error } = await supabase
     .from('conversations')
     .insert({
@@ -90,6 +90,7 @@ async function saveMessage({ clinicId, patientId, patientPhone, role, content, t
       whatsapp_message_id: whatsappMessageId || null,
       message_type:        messageType || 'text',
       original_media_id:   originalMediaId || null,
+      media_url:           mediaUrl || null,
       created_at:          new Date().toISOString(),
     })
     .select('id')

@@ -42,6 +42,66 @@ async function execute(decision, clinic, patient, patientPhone) {
     case 'REPLY_CONTACT_CLINIC':
       return 'ما عندي معلومة عن هذا الموضوع، تواصل مع العيادة مباشرة للاستفسار.';
 
+    case 'GATE_START': {
+      await upsertConversationState(clinic.id, patientPhone, 'gate_collecting', {
+        escalation: { gate_step: 1, answers: {} }
+      });
+      return 'قبل ما نحول طلبك للطبيب، خلّني أجمع بعض المعلومات:\n\n' +
+             '❓ هل هذه متابعة بعد زيارة سابقة للعيادة؟';
+    }
+
+    case 'GATE_CONTINUE': {
+      const stateData = decision.data || {}; // wait, in decide we didn't pass data? let me check decide.
+      // Ah! In decide I returned step: stateData.escalation?.gate_step, let's fetch stateData from patientPhone?
+      // Wait, execute doesn't receive stateData directly, I need to fetch it or pass it.
+      // Or I can just fetch it here.
+      const { data: stateRow } = await supabase.from('conversation_state').select('state_data').eq('clinic_id', clinic.id).eq('patient_phone', patientPhone).single();
+      const currentStateData = stateRow?.state_data || {};
+      const esc = currentStateData.escalation || {};
+      const step = decision.step || 1;
+      const answers = { ...(esc.answers || {}) };
+      
+      answers[`q${step}`] = decision.userMessage;
+
+      const questions = [
+        null,
+        'ما المشكلة أو السبب اللي تحتاج فيه رأي الطبيب؟',
+        'هل توجد أعراض حالياً؟ وصفها لو سمحت.',
+        'إذا عندك تحليل أو تقرير، أرسل صورته الآن. وإذا ما عندك اكتب "لا يوجد".',
+      ];
+
+      if (step < questions.length) {
+        await upsertConversationState(clinic.id, patientPhone, 'gate_collecting', {
+          escalation: { ...esc, gate_step: step + 1, answers }
+        });
+        return questions[step];
+      }
+
+      // اكتملت الأسئلة → ملخص + تصعيد
+      function buildEscalationSummary(patient, answers) {
+        return [
+          `👤 ${patient.name || patient.phone}`,
+          `📋 متابعة: ${answers.q1 || 'غير محدد'}`,
+          `🩺 المشكلة: ${answers.q2 || 'غير محدد'}`,
+          `⚠️ الأعراض: ${answers.q3 || 'غير محدد'}`,
+          answers.q4 && !/لا يوجد|لا/i.test(answers.q4) ? '📎 يوجد مرفقات' : '📎 لا يوجد مرفقات',
+        ].join('\n');
+      }
+
+      const summary = buildEscalationSummary(patient, answers);
+      await upsertConversationState(clinic.id, patientPhone, 'doctor_pending', {
+        escalation: {
+          ...esc, answers, summary,
+          escalated_at: new Date().toISOString(),
+          is_followup: /نعم|اي|متابعة/i.test(answers.q1 || ''),
+        }
+      });
+
+      return 'تم تحويل طلبك للطبيب 👨‍⚕️\n' +
+             'سيتم الرد هنا بعد المراجعة خلال الوقت المعتاد للرد.\n' +
+             'إذا احتجت شي ثاني (حجز، استفسار) تكدر تسأل عادي.';
+    }
+
     case 'ASK_MISSING': {
       await upsertConversationState(clinic.id, patientPhone, 'active', {
         booking_substate: 'awaiting_info',

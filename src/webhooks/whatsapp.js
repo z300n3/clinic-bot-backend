@@ -9,7 +9,7 @@ const {
   getConversationState,
   upsertConversationState,
 } = require('../services/supabase');
-const { sendWhatsAppMessage, markMessageRead, sendTypingIndicator, downloadWhatsAppMedia } = require('../services/whatsapp');
+const { sendWhatsAppMessage, markMessageRead, sendTypingIndicator, downloadWhatsAppMedia, downloadAndStoreMedia } = require('../services/whatsapp');
 const { transcribeAudio } = require('../services/transcription');
 const { debounceMessage } = require('../services/messageDebouncer');
 const logger = require('../utils/logger');
@@ -57,6 +57,7 @@ router.post('/', async (req, res) => {
           let text            = null;
           let messageType     = 'text';
           let originalMediaId = null;
+          let mediaUrl        = null;
 
           // ── Text message ───────────────────────────────────────────────────
           if (message.type === 'text') {
@@ -86,7 +87,37 @@ router.post('/', async (req, res) => {
               continue;
             }
 
-          // ── Unsupported type (image, video, sticker, document …) ───────────
+          // ── Image message ──────────────────────────────────────────
+          } else if (message.type === 'image') {
+            const clinic = await getClinicByPhoneNumberId(phoneNumberId);
+            const stateRow = clinic ? await getConversationState(clinic.id, message.from) : null;
+            const acceptMedia = ['gate_collecting', 'doctor_pending', 'doctor_active'].includes(stateRow?.state);
+            
+            if (acceptMedia && clinic) {
+              try {
+                mediaUrl = await downloadAndStoreMedia(message.image.id, clinic.id, message.from);
+                text = message.image.caption || '📷 صورة مرفقة';
+                messageType = 'image';
+                originalMediaId = message.image.id;
+              } catch (err) {
+                logger.error('Failed to download image', { error: err.message });
+                await sendWhatsAppMessage(phoneNumberId, message.from, 'نأسف، حدث خطأ أثناء معالجة الصورة.').catch(() => {});
+                continue;
+              }
+            } else {
+              logger.info('Unsupported message type — skipping', {
+                type: message.type,
+                from: message.from,
+              });
+              await sendWhatsAppMessage(
+                phoneNumberId,
+                message.from,
+                'نأسف، ما نقدر نقرأ هذا النوع من الرسائل حالياً. يرجى إرسال رسالة نصية أو صوتية. 🙏'
+              ).catch(() => {});
+              continue;
+            }
+
+          // ── Unsupported type (video, sticker, document …) ───────────
           } else {
             logger.info('Unsupported message type — skipping', {
               type: message.type,
@@ -109,6 +140,7 @@ router.post('/', async (req, res) => {
             text,
             messageType,
             originalMediaId,
+            mediaUrl,
           }).catch((err) =>
             logger.error('Unhandled processMessage error', { error: err.message })
           );
@@ -125,7 +157,7 @@ router.post('/', async (req, res) => {
 // Handles deduplication and starts/resets the debounce timer.
 // The heavy AI work is deferred to processDebounced().
 
-async function processMessage({ phoneNumberId, from, profileName, messageId, text, messageType, originalMediaId }) {
+async function processMessage({ phoneNumberId, from, profileName, messageId, text, messageType, originalMediaId, mediaUrl }) {
   logger.info('Processing message', {
     from,
     messageId,
@@ -153,6 +185,7 @@ async function processMessage({ phoneNumberId, from, profileName, messageId, tex
     whatsappMessageId: messageId,
     messageType,
     originalMediaId,
+    mediaUrl,
   });
 
   if (saved === null) {
@@ -185,7 +218,7 @@ const RESUME_KEYWORDS = [
   'كلمني', 'ليس ميحتاج', 'ما ميحتاج', 'لا يهم', 'نسيت',
 ];
 
-// Iraqi-Arabic positive/agreement phrases — must NEVER trigger awaiting_human
+// Iraqi-Arabic positive/agreement phrases — must NEVER trigger doctor_pending
 // (kept here as a reference; the enforcement is in the system prompt)
 // "مو مشكلة", "لا مشكلة", "ماكو مشكلة", "تمام", "زين", "موافق" …
 
@@ -193,12 +226,12 @@ async function processDebounced({ clinic, patient, phoneNumberId, from, combined
   // 1. Check conversation state
   const state = await getConversationState(clinic.id, from);
 
-  if (state?.state === 'awaiting_human') {
+  if (state?.state === 'doctor_pending') {
     // If patient sends a booking or dismissal keyword → auto-resume the bot
     const wantsResume = RESUME_KEYWORDS.some((kw) => combinedText.includes(kw));
 
     if (wantsResume) {
-      logger.info('Auto-resuming bot from awaiting_human', { from, trigger: combinedText.slice(0, 60) });
+      logger.info('Auto-resuming bot from doctor_pending', { from, trigger: combinedText.slice(0, 60) });
       await upsertConversationState(clinic.id, from, 'active', {});
       // Fall through — process normally with Claude
     } else {
@@ -208,7 +241,7 @@ async function processDebounced({ clinic, patient, phoneNumberId, from, combined
       const shouldNotify   = (Date.now() - lastReplyTime) >= FIVE_MIN_MS;
 
       if (shouldNotify) {
-        await upsertConversationState(clinic.id, from, 'awaiting_human', state.state_data);
+        await upsertConversationState(clinic.id, from, 'doctor_pending', state.state_data);
         await sendWhatsAppMessage(phoneNumberId, from, 'تم استلام رسالتك، فريق العيادة سيرد قريباً ⏳');
       }
       return;

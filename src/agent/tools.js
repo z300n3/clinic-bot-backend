@@ -638,7 +638,7 @@ async function escalateToHuman({ reason }, { clinic, patientPhone }) {
         {
           clinic_id:       clinic.id,
           patient_phone:   patientPhone,
-          state:           'awaiting_human',
+          state:           'doctor_pending',
           state_data:      { reason, escalated_at: new Date().toISOString() },
           last_message_at: new Date().toISOString(),
         },
@@ -648,7 +648,7 @@ async function escalateToHuman({ reason }, { clinic, patientPhone }) {
     return {
       success: true,
       message: 'راح يتواصل معاك أحد من فريق العيادة قريباً إن شاء الله. شكراً على صبرك! 🙏',
-      state:   'awaiting_human',
+      state:   'doctor_pending',
     };
   } catch (err) {
     logger.error('escalateToHuman error', { error: err.message });

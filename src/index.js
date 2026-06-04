@@ -83,4 +83,9 @@ app.listen(PORT, () => {
   const { sendReminders } = require('./jobs/reminders');
   setInterval(sendReminders, 60 * 60 * 1000); // every hour
   sendReminders(); // run once on startup
+
+  // Media Cleanup job
+  const { cleanupExpiredMedia } = require('./jobs/mediaCleanup');
+  setInterval(cleanupExpiredMedia, 60 * 60 * 1000); // every hour
+  cleanupExpiredMedia(); // run once on startup
 });

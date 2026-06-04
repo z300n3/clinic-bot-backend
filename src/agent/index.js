@@ -2,7 +2,7 @@ const { extractIntent }     = require('./extract');
 const { validateExtracted } = require('./validate');
 const { decide }            = require('./decide');
 const { execute }           = require('./execute');
-const { saveMessage, loadConversationHistory, supabase } = require('../services/supabase');
+const { saveMessage, loadConversationHistory, supabase, upsertConversationState } = require('../services/supabase');
 const logger = require('../utils/logger');
 
 async function handleIncomingMessage({ clinic, patient, patientPhone, userMessage }) {
@@ -19,16 +19,37 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
   const stateData    = stateRow?.state_data || {};
   const subState     = stateData.booking_substate || 'idle';
 
-  // 2. Handle awaiting_human (bypass pipeline)
-  if (currentState === 'awaiting_human') {
-    const reply = 'راح يتواصل معاك أحد من فريق العيادة قريباً. شكراً على صبرك! 🙏';
+  // 2. Handle doctor_active (bypass pipeline)
+  if (currentState === 'doctor_active') {
+    const reply = 'الطبيب يراجع حالتك حالياً. الرد قريب 🙏';
     await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
     return reply;
   }
 
   // 3. Extract
   const extracted = await extractIntent(userMessage, subState, stateData);
+  extracted.userMessage = userMessage; // pass raw message for gate answers
   logger.info('[Pipeline] Extracted', { intent: extracted.intent });
+
+  // 4. Handle doctor_pending
+  if (currentState === 'doctor_pending') {
+    if (['booking', 'inquiry', 'check_appointment', 'greeting', 'cancellation', 'cancel_all'].includes(extracted.intent)) {
+      const checks = await validateExtracted(extracted, clinic, patient, stateData, userMessage);
+      const decision = decide(extracted, checks, subState, stateData);
+      const reply = await execute(decision, clinic, patient, patientPhone);
+      
+      // إعادة حالة doctor_pending مع الحفاظ على بيانات التصعيد
+      await upsertConversationState(clinic.id, patientPhone, 'doctor_pending', stateData);
+      
+      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+      return reply;
+    }
+
+    // أي شيء آخر → تنبيه الانتظار
+    const reply = 'طلبك بانتظار مراجعة الطبيب. سيتم الرد قريباً 🙏\nإذا تحتاج حجز أو استفسار، تكدر تسأل عادي.';
+    await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+    return reply;
+  }
 
   // 4. Validate
   const checks = await validateExtracted(extracted, clinic, patient, stateData, userMessage);

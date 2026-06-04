@@ -40,6 +40,29 @@ router.post('/send', async (req, res) => {
     return res.status(404).json({ error: 'العيادة غير موجودة' });
   }
 
+  // ── 24h window check & State Retrieval ────────────────────────────────────
+  const { data: stateRow } = await supabase
+    .from('conversation_state')
+    .select('state, last_message_at')
+    .eq('clinic_id', clinic_id)
+    .eq('patient_phone', patient_phone)
+    .single();
+
+  const lastMsg = stateRow?.last_message_at ? new Date(stateRow.last_message_at) : null;
+  const hoursSince = lastMsg ? (Date.now() - lastMsg.getTime()) / (1000 * 60 * 60) : Infinity;
+
+  if (hoursSince > 24) {
+    return res.status(400).json({
+      success: false,
+      error: 'expired_window',
+      message: 'مضى أكثر من 24 ساعة على آخر رسالة من المريض.',
+      hours_since: Math.round(hoursSince)
+    });
+  }
+
+  // ── Prefix doctor message ─────────────────────────────────────────────────
+  const prefixedMessage = '👨‍⚕️ رد الطبيب:\n\n' + text;
+
   // ── Save to conversations table ───────────────────────────────────────────
   const { error: saveErr } = await supabase
     .from('conversations')
@@ -47,7 +70,7 @@ router.post('/send', async (req, res) => {
       clinic_id,
       patient_phone,
       role:    'doctor',
-      content: text,
+      content: prefixedMessage,
     });
 
   if (saveErr) {
@@ -57,19 +80,20 @@ router.post('/send', async (req, res) => {
 
   logger.info('Doctor message saved', { to: patient_phone, clinic_id });
 
-  // ── If awaiting_human → reset to active so the bot can resume later ───────
-  await supabase
-    .from('conversation_state')
-    .update({ state: 'active', state_data: {} })
-    .eq('clinic_id', clinic_id)
-    .eq('patient_phone', patient_phone)
-    .eq('state', 'awaiting_human');
+  // ── Update state after doctor replies ─────────────────────────────────────
+  if (stateRow?.state === 'doctor_pending' || stateRow?.state === 'doctor_active' || stateRow?.state === 'awaiting_human') {
+    await supabase
+      .from('conversation_state')
+      .update({ state: 'active', state_data: { after_doctor: true } })
+      .eq('clinic_id', clinic_id)
+      .eq('patient_phone', patient_phone);
+  }
 
   // ── Send via WhatsApp Meta API (best-effort) ──────────────────────────────
   const phoneNumberId = clinic.whatsapp_phone_number_id || process.env.META_PHONE_NUMBER_ID;
 
   try {
-    await sendWhatsAppMessage(phoneNumberId, patient_phone, text);
+    await sendWhatsAppMessage(phoneNumberId, patient_phone, prefixedMessage);
     logger.info('Doctor WhatsApp message sent', { to: patient_phone });
     return res.json({ success: true });
   } catch (err) {

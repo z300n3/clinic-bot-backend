@@ -2,6 +2,16 @@ function decide(extracted, checks, currentState, stateData) {
 
   const { intent } = extracted;
 
+  // ── Gate Collecting (المريض يجاوب أسئلة Gate) ────────────────────────
+  if (currentState === 'gate_collecting') {
+    return { action: 'GATE_CONTINUE', step: stateData.escalation?.gate_step || 1, userMessage: extracted.userMessage };
+  }
+
+  // ── Escalation to Doctor ──────────────────────────────────────────────
+  if (intent === 'escalate_to_doctor') {
+    return { action: 'GATE_START' };
+  }
+
   // ── Confirmation/Rejection (state-dependent) ──────────────────────────────
   if (intent === 'confirmation') {
     if (currentState === 'awaiting_rebook_confirm')
