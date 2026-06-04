@@ -8,12 +8,20 @@ const logger = require('../utils/logger');
 async function handleIncomingMessage({ clinic, patient, patientPhone, userMessage }) {
 
   // 1. Load state
-  const { data: stateRow } = await supabase
+  const { data: stateRow, error: stateErr } = await supabase
     .from('conversation_state')
-    .select('state, state_data')
+    .select('state, state_data, last_message_at')
     .eq('clinic_id', clinic.id)
     .eq('patient_phone', patientPhone)
     .maybeSingle();
+
+  logger.info('[STATE READ]', {
+    clinicId: clinic.id,
+    patientPhone: patientPhone,
+    currentState: stateRow?.state || 'NONE',
+    gateStep: stateRow?.state_data?.escalation?.gate_step || null,
+    readError: stateErr?.message || null
+  });
 
   const currentState = stateRow?.state      || 'active';
   const stateData    = stateRow?.state_data || {};
@@ -29,7 +37,11 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
   // 3. Run Extract FIRST (works for all states now)
   const extracted = await extractIntent(userMessage, subState, stateData);
   extracted.userMessage = userMessage; // pass raw message for gate answers
-  logger.info('[Pipeline] Extracted', { intent: extracted.intent });
+  logger.info('[Pipeline] Extracted', { 
+    intent: extracted.intent,
+    msgPreview: userMessage.slice(0, 30),
+    stateAtExtract: currentState
+  });
 
   // 4. GATE handling — intent-aware
   if (currentState === 'gate_collecting') {
