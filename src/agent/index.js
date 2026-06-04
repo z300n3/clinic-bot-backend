@@ -26,17 +26,33 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
     return reply;
   }
 
-  // 3. GATE BYPASS (المريض يجيب على أسئلة الطبيب)
+  // 3. Run Extract FIRST (works for all states now)
+  const extracted = await extractIntent(userMessage, subState, stateData);
+  extracted.userMessage = userMessage; // pass raw message for gate answers
+  logger.info('[Pipeline] Extracted', { intent: extracted.intent });
+
+  // 4. GATE handling — intent-aware
   if (currentState === 'gate_collecting') {
-    // مخرج الطوارئ للإلغاء
-    if (/الغاء|إلغاء|خروج|رجوع|بطلت/i.test(userMessage)) {
+    // 4a. Explicit cancel/exit keywords
+    if (/الغاء|إلغاء|خروج|رجوع|بطلت|ما اريد|لا اريد/i.test(userMessage)) {
       await upsertConversationState(clinic.id, patientPhone, 'active', {});
-      const reply = 'تم إلغاء الطلب والتراجع. كيف أقدر أساعدك الآن؟';
+      const reply = 'تم إلغاء الطلب والتراجع. كيف أقدر أساعدك الآن؟ 😊';
       await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
       return reply;
     }
 
-    // تمرير الإجابة مباشرة لملف execute (تجاوز الذكاء الاصطناعي)
+    // 4b. Strong NEW intent → leave gate and process new request
+    const strongIntents = ['booking', 'cancellation', 'cancel_all', 'check_appointment'];
+    if (strongIntents.includes(extracted.intent)) {
+      await upsertConversationState(clinic.id, patientPhone, 'active', {});
+      const checks = await validateExtracted(extracted, clinic, patient, {}, userMessage);
+      const decision = decide(extracted, checks, 'idle', {});
+      const reply = await execute(decision, clinic, patient, patientPhone);
+      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+      return reply;
+    }
+
+    // 4c. Otherwise → treat as a gate answer (continue gate)
     const decision = { 
       action: 'GATE_CONTINUE', 
       step: stateData.escalation?.gate_step || 1, 
@@ -47,43 +63,62 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
     return reply;
   }
 
-  // 4. Extract
-  const extracted = await extractIntent(userMessage, subState, stateData);
-  extracted.userMessage = userMessage; // pass raw message for gate answers
-  logger.info('[Pipeline] Extracted', { intent: extracted.intent });
-
-  // 4. Handle doctor_pending
+  // 5. doctor_pending handling (unchanged hybrid logic)
   if (currentState === 'doctor_pending') {
     if (['booking', 'inquiry', 'check_appointment', 'greeting', 'cancellation', 'cancel_all'].includes(extracted.intent)) {
       const checks = await validateExtracted(extracted, clinic, patient, stateData, userMessage);
       const decision = decide(extracted, checks, subState, stateData);
       const reply = await execute(decision, clinic, patient, patientPhone);
       
-      // إعادة حالة doctor_pending مع الحفاظ على بيانات التصعيد
       await upsertConversationState(clinic.id, patientPhone, 'doctor_pending', stateData);
-      
       await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
       return reply;
     }
 
-    // أي شيء آخر → تنبيه الانتظار
     const reply = 'طلبك بانتظار مراجعة الطبيب. سيتم الرد قريباً 🙏\nإذا تحتاج حجز أو استفسار، تكدر تسأل عادي.';
     await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
     return reply;
   }
 
-  // 5. Validate
+  // 6. SUBSTATE ESCAPE — stale confirmation substate blocked by new intent
+  const confirmSubstates = ['awaiting_cancel_confirm','awaiting_cancel_all_confirm',
+                            'awaiting_rebook_confirm','awaiting_cancel_select','awaiting_date','awaiting_info'];
+  const escapeIntents = ['booking','escalate_to_doctor','cancellation','cancel_all','inquiry','check_appointment'];
+
+  if (confirmSubstates.includes(subState) &&
+      extracted.intent !== 'confirmation' &&
+      extracted.intent !== 'rejection' &&
+      escapeIntents.includes(extracted.intent)) {
+    await upsertConversationState(clinic.id, patientPhone, 'active', {});
+    stateData.booking_substate = 'idle';
+  }
+
+  // 7. SUBSTATE EXPIRY — any substate older than 10 minutes auto-resets
+  if (subState && subState !== 'idle' && stateRow?.last_message_at) {
+    const minutesSince = (Date.now() - new Date(stateRow.last_message_at).getTime()) / 60000;
+    if (minutesSince > 10) {
+      await upsertConversationState(clinic.id, patientPhone, 'active', {});
+      stateData.booking_substate = 'idle';
+    }
+  }
+
+  // 8. escalate_to_doctor intent (NOT in gate) → start gate
+  if (extracted.intent === 'escalate_to_doctor') {
+    const decision = { action: 'GATE_START' };
+    const reply = await execute(decision, clinic, patient, patientPhone);
+    await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
+    return reply;
+  }
+
+  // 9. Normal pipeline: Validate → Decide → Execute
+  const recomputedSubState = stateData.booking_substate || 'idle';
   const checks = await validateExtracted(extracted, clinic, patient, stateData, userMessage);
   logger.info('[Pipeline] Validated', { nameValid: checks.nameValid, dayAvail: checks.dayInfo?.isWorking });
 
-  // 6. Decide
-  const decision = decide(extracted, checks, subState, stateData);
+  const decision = decide(extracted, checks, recomputedSubState, stateData);
   logger.info('[Pipeline] Decision', { action: decision.action });
 
-  // 7. Execute
   const reply = await execute(decision, clinic, patient, patientPhone);
-
-  // 7. Save
   await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
 
   return reply;
