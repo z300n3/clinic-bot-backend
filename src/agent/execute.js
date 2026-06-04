@@ -87,8 +87,12 @@ async function execute(decision, clinic, patient, patientPhone) {
       return `مواعيدك القادمة:\n${lines.join('\n')}`;
     }
 
-    case 'CONFIRM_CANCEL':
+    case 'CONFIRM_CANCEL': {
+      await upsertConversationState(clinic.id, patientPhone, 'active', {
+        booking_substate: 'awaiting_cancel_confirm'
+      });
       return 'تأكد إنك تريد إلغاء موعدك القادم؟ (نعم / لا)';
+    }
 
     case 'DO_CANCEL': {
       const { data: pat } = await supabase
