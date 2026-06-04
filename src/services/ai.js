@@ -7,7 +7,7 @@ const client = new OpenAI({
 
 const MODELS = {
   flash: 'deepseek-v4-flash',
-  chat:  'deepseek-v4-flash',
+  chat:  'deepseek-chat',
   pro:   'deepseek-reasoner'
 };
 
