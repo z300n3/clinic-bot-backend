@@ -50,7 +50,7 @@ async function extractIntent(userMessage, currentState, stateData) {
 رسالة المريض: "${userMessage}"
 
 {
-  "intent": "booking (للحجز) | cancellation (لإلغاء الحجز) | inquiry (للاستفسار) | check_appointment (للسؤال عن مواعيدي وحجوزاتي) | greeting (ترحيب) | unclear (غير واضح)",
+  "intent": "booking (للحجز) | cancellation (لإلغاء حجز محدد) | cancel_all (لإلغاء جميع حجوزاتي) | inquiry (للاستفسار) | check_appointment (للسؤال عن مواعيدي) | greeting (ترحيب) | unclear (غير واضح)",
   "patient_name": "الاسم الكامل أو null — فقط إذا ذُكر صراحةً",
   "date_preference": "التاريخ أو اليوم أو null",
   "reason": "سبب الزيارة أو null",
@@ -72,9 +72,9 @@ async function extractIntent(userMessage, currentState, stateData) {
   * custom: أي سؤال عام عن العيادة لا يندرج تحت التصنيفات السابقة.
 - ملاحظة هامة جداً للأسئلة المزدوجة (حجز + استفسار):
   إذا احتوت الرسالة على طلب حجز وسؤال استفساري في نفس الوقت (مثل: "اريد حجز وكم السعر؟")، يجب أن تختار دائماً intent = "booking"، وتستخرج المواضيع المطلوبة وتضعها في faq_topics. إياك أن تختار "unclear" إذا كان هناك حجز واضح.
-- ملاحظة هامة: إذا كانت الحالة الحالية (awaiting_info أو awaiting_date):
+- ملاحظة هامة: إذا كانت الحالة الحالية (awaiting_info أو awaiting_date أو awaiting_cancel_select):
   1. أولاً، تأكد ما إذا كانت الرسالة سؤالاً استفسارياً واضحاً (عن السعر، المكان، الاختصاص، الخ). إذا كانت كذلك، اجعل intent = "inquiry" واستخرج faq_topics المناسبة.
-  2. ثانياً، إذا لم تكن سؤالاً بل نصاً قصيراً (اسم، يوم، شكوى مرضية)، افترض أنه إجابة لإكمال الحجز، واجعل intent = "booking" وقم بتعبئة الحقول (patient_name, date_preference, reason).`
+  2. ثانياً، إذا لم تكن سؤالاً بل نصاً قصيراً (اسم، يوم، شكوى مرضية)، افترض أنه إجابة لإكمال الحجز أو إلغاء الموعد، واجعل intent = "booking" أو "cancellation" وقم بتعبئة الحقل المناسب (مثل patient_name).`
 
   try {
     const response = await client.chat.completions.create({

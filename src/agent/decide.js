@@ -8,13 +8,28 @@ function decide(extracted, checks, currentState, stateData) {
       return { action: 'DO_REBOOK', data: stateData };
     if (currentState === 'awaiting_cancel_confirm')
       return { action: 'DO_CANCEL', data: stateData };
+    if (currentState === 'awaiting_cancel_all_confirm')
+      return { action: 'DO_CANCEL_ALL', data: stateData };
     return { action: 'UNCLEAR' };
   }
 
   if (intent === 'rejection') {
-    if (['awaiting_rebook_confirm','awaiting_cancel_confirm'].includes(currentState))
+    if (['awaiting_rebook_confirm','awaiting_cancel_confirm','awaiting_cancel_all_confirm'].includes(currentState))
       return { action: 'CANCEL_FLOW' };
     return { action: 'UNCLEAR' };
+  }
+
+  // ── Awaiting Cancel Select ──────────────────────────────────────────────────
+  if (currentState === 'awaiting_cancel_select') {
+    if (extracted.patient_name || intent === 'cancellation') {
+      const targetName = (extracted.patient_name || '').trim().toLowerCase();
+      const appts = stateData.cancel_appts || [];
+      const matched = appts.find(a => (a.patient_name || '').trim().toLowerCase() === targetName);
+      if (matched) {
+        return { action: 'CONFIRM_CANCEL', targetAppt: matched };
+      }
+    }
+    return { action: 'ASK_CANCEL_SELECT', appts: stateData.cancel_appts || [] };
   }
 
   // ── Greeting ──────────────────────────────────────────────────────────────
@@ -53,8 +68,28 @@ function decide(extracted, checks, currentState, stateData) {
   }
 
   // ── Cancellation ──────────────────────────────────────────────────────────
-  if (intent === 'cancellation')
-    return { action: 'CONFIRM_CANCEL' };
+  if (intent === 'cancel_all') {
+    if (checks.upcomingAppts.length === 0)
+      return { action: 'NO_APPOINTMENTS' };
+    return { action: 'CONFIRM_CANCEL_ALL', appts: checks.upcomingAppts };
+  }
+
+  if (intent === 'cancellation') {
+    if (checks.upcomingAppts.length === 0)
+      return { action: 'NO_APPOINTMENTS' };
+      
+    if (checks.upcomingAppts.length === 1)
+      return { action: 'CONFIRM_CANCEL', targetAppt: checks.upcomingAppts[0] };
+      
+    if (extracted.patient_name) {
+      const targetName = extracted.patient_name.trim().toLowerCase();
+      const matched = checks.upcomingAppts.find(a => (a.patient_name || '').trim().toLowerCase() === targetName);
+      if (matched)
+        return { action: 'CONFIRM_CANCEL', targetAppt: matched };
+    }
+    
+    return { action: 'ASK_CANCEL_SELECT', appts: checks.upcomingAppts };
+  }
 
   // ── Booking ───────────────────────────────────────────────────────────────
   if (intent === 'booking') {

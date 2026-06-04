@@ -177,8 +177,8 @@ async function validateExtracted(extracted, clinic, patient, stateData, userMess
     }
   }
 
-  // 5. Check patient's upcoming appointments (for check_appointment intent)
-  if (extracted.intent === 'check_appointment') {
+  // 5. Check patient's upcoming appointments
+  if (['check_appointment', 'cancellation', 'cancel_all'].includes(extracted.intent) || stateData.booking_substate === 'awaiting_cancel_select') {
     const now = getBaghdadNow();
     const { data } = await supabase
       .from('appointments')

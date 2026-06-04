@@ -87,35 +87,80 @@ async function execute(decision, clinic, patient, patientPhone) {
       return `مواعيدك القادمة:\n${lines.join('\n')}`;
     }
 
-    case 'CONFIRM_CANCEL': {
+    case 'ASK_CANCEL_SELECT': {
       await upsertConversationState(clinic.id, patientPhone, 'active', {
-        booking_substate: 'awaiting_cancel_confirm'
+        booking_substate: 'awaiting_cancel_select',
+        cancel_appts: decision.appts
       });
-      return 'تأكد إنك تريد إلغاء موعدك القادم؟ (نعم / لا)';
+      const lines = decision.appts.map(a => {
+        const d = dayjs(a.scheduled_at).tz(TIMEZONE);
+        const dateStr = `${d.date()}/${d.month()+1}`;
+        return `🔹 ${a.patient_name || 'بدون اسم'} (يوم ${dateStr})`;
+      });
+      return `عندك أكثر من موعد قادم:\n${lines.join('\n')}\n\nاكتب اسم المريض اللي تريد تلغي موعده، أو اكتب "الغي كل مواعيدي".`;
+    }
+
+    case 'CONFIRM_CANCEL_ALL': {
+      await upsertConversationState(clinic.id, patientPhone, 'active', {
+        booking_substate: 'awaiting_cancel_all_confirm',
+        cancel_appt_ids: decision.appts.map(a => a.id)
+      });
+      return `تأكد إنك تريد إلغاء جميع مواعيدك القادمة (${decision.appts.length} مواعيد)؟ (نعم / لا)`;
+    }
+
+    case 'CONFIRM_CANCEL': {
+      const targetAppt = decision.targetAppt || {};
+      await upsertConversationState(clinic.id, patientPhone, 'active', {
+        booking_substate: 'awaiting_cancel_confirm',
+        cancel_target_id: targetAppt.id
+      });
+      const d = targetAppt.scheduled_at ? dayjs(targetAppt.scheduled_at).tz(TIMEZONE) : dayjs().tz(TIMEZONE);
+      const days = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+      const dateStr = `${days[d.day()]} ${d.date()}/${d.month()+1}`;
+      return `تأكد إنك تريد إلغاء موعد "${targetAppt.patient_name || 'بدون اسم'}" يوم ${dateStr}؟ (نعم / لا)`;
     }
 
     case 'DO_CANCEL': {
-      const { data: pat } = await supabase
-        .from('patients').select('id')
-        .eq('clinic_id', clinic.id).eq('phone_number', patientPhone).maybeSingle();
+      const { cancel_target_id } = decision.data || {};
+      
+      if (cancel_target_id) {
+        await supabase.from('appointments')
+          .update({ status: 'cancelled', cancelled_at: new Date().toISOString() })
+          .eq('id', cancel_target_id);
+      } else {
+        // Fallback for safety
+        const { data: pat } = await supabase
+          .from('patients').select('id')
+          .eq('clinic_id', clinic.id).eq('phone_number', patientPhone).maybeSingle();
 
-      if (!pat) return 'ما وجدنا بيانات لهذا الرقم.';
-
-      const { data: appt } = await supabase
-        .from('appointments').select('id, scheduled_at')
-        .eq('clinic_id', clinic.id).eq('patient_id', pat.id)
-        .in('status', ['scheduled','confirmed'])
-        .gte('scheduled_at', new Date().toISOString())
-        .order('scheduled_at', { ascending: true }).limit(1).maybeSingle();
-
-      if (!appt) return 'ما عندك مواعيد قادمة.';
-
-      await supabase.from('appointments')
-        .update({ status: 'cancelled', cancelled_at: new Date().toISOString() })
-        .eq('id', appt.id);
+        if (pat) {
+          const { data: appt } = await supabase
+            .from('appointments').select('id')
+            .eq('clinic_id', clinic.id).eq('patient_id', pat.id)
+            .in('status', ['scheduled','confirmed'])
+            .gte('scheduled_at', new Date().toISOString())
+            .order('scheduled_at', { ascending: true }).limit(1).maybeSingle();
+          if (appt) {
+            await supabase.from('appointments')
+              .update({ status: 'cancelled', cancelled_at: new Date().toISOString() })
+              .eq('id', appt.id);
+          }
+        }
+      }
 
       await upsertConversationState(clinic.id, patientPhone, 'active', {});
       return 'تم إلغاء موعدك بنجاح ✅';
+    }
+
+    case 'DO_CANCEL_ALL': {
+      const { cancel_appt_ids } = decision.data || {};
+      if (cancel_appt_ids && cancel_appt_ids.length > 0) {
+        await supabase.from('appointments')
+          .update({ status: 'cancelled', cancelled_at: new Date().toISOString() })
+          .in('id', cancel_appt_ids);
+      }
+      await upsertConversationState(clinic.id, patientPhone, 'active', {});
+      return 'تم إلغاء جميع مواعيدك بنجاح ✅';
     }
 
     case 'CONFIRM_REBOOK': {
