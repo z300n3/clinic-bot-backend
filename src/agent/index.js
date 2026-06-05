@@ -104,6 +104,9 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
     if (!extracted.patient_name && partial.patient_name) {
       extracted.patient_name = partial.patient_name;
     }
+    if (!extracted.date_preference && partial.date_preference) {
+      extracted.date_preference = partial.date_preference;
+    }
     // Keep substate so pipeline continues normally
   }
 

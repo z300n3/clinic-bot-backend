@@ -106,7 +106,8 @@ async function execute(decision, clinic, patient, patientPhone) {
       await upsertConversationState(clinic.id, patientPhone, 'active', {
         booking_substate: 'awaiting_info',
         partial_booking: {
-          patient_name: decision.extracted?.patient_name || null,
+          patient_name:    decision.extracted?.patient_name || null,
+          date_preference: decision.extracted?.date_preference || null,
         }
       });
       const fields = decision.fields.join(' و ');
@@ -120,7 +121,8 @@ async function execute(decision, clinic, patient, patientPhone) {
       await upsertConversationState(clinic.id, patientPhone, 'active', {
         booking_substate: 'awaiting_info',
         partial_booking: {
-          patient_name: decision.extracted?.patient_name || null,
+          patient_name:    decision.extracted?.patient_name || null,
+          date_preference: decision.extracted?.date_preference || null,
         }
       });
       let msg = '';
@@ -262,7 +264,8 @@ async function execute(decision, clinic, patient, patientPhone) {
       await upsertConversationState(clinic.id, patientPhone, 'active', {
         booking_substate: 'awaiting_date',
         partial_booking: {
-          patient_name: decision.extracted?.patient_name || null,
+          patient_name:    decision.extracted?.patient_name || null,
+          date_preference: null,
         }
       });
       return `${dayInfo.displayDate} الدكتور غير متوفر ولا يوجد بديل. تكدر تحجز يوم ثاني؟`;
@@ -272,7 +275,8 @@ async function execute(decision, clinic, patient, patientPhone) {
       await upsertConversationState(clinic.id, patientPhone, 'active', {
         booking_substate: 'awaiting_date',
         partial_booking: {
-          patient_name: decision.extracted?.patient_name || null,
+          patient_name:    decision.extracted?.patient_name || null,
+          date_preference: null,
         }
       });
       return 'انتهى دوام العيادة اليوم 🕐\nتكدر تحجز ليوم ثاني؟ قولي أي يوم يناسبك.';
@@ -283,7 +287,8 @@ async function execute(decision, clinic, patient, patientPhone) {
       await upsertConversationState(clinic.id, patientPhone, 'active', {
         booking_substate: 'awaiting_date',
         partial_booking: {
-          patient_name: decision.extracted?.patient_name || null,
+          patient_name:    decision.extracted?.patient_name || null,
+          date_preference: null,
         }
       });
       return `عذراً، اكتمل العدد ليوم ${dayInfo.displayDate}. جرب يوماً آخر.`;
