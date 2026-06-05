@@ -94,9 +94,20 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
 
   // 6. SUBSTATE ESCAPE — stale confirmation substate blocked by new intent
   const confirmSubstates = ['awaiting_cancel_confirm','awaiting_cancel_all_confirm',
-                            'awaiting_rebook_confirm','awaiting_cancel_select','awaiting_date','awaiting_info'];
+                            'awaiting_rebook_confirm','awaiting_cancel_select'];
+  const bookingSubstates = ['awaiting_info', 'awaiting_date'];
   const escapeIntents = ['booking','escalate_to_doctor','cancellation','cancel_all','inquiry','check_appointment'];
 
+  // 6a. For booking substates (awaiting_info, awaiting_date): merge partial_booking with new data
+  if (bookingSubstates.includes(subState) && extracted.intent === 'booking') {
+    const partial = stateData.partial_booking || {};
+    if (!extracted.patient_name && partial.patient_name) {
+      extracted.patient_name = partial.patient_name;
+    }
+    // Keep substate so pipeline continues normally
+  }
+
+  // 6b. For confirmation substates: escape if new strong intent
   if (confirmSubstates.includes(subState) &&
       extracted.intent !== 'confirmation' &&
       extracted.intent !== 'rejection' &&
