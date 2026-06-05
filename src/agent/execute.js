@@ -107,7 +107,6 @@ async function execute(decision, clinic, patient, patientPhone) {
         booking_substate: 'awaiting_info',
         partial_booking: {
           patient_name: decision.extracted?.patient_name || null,
-          reason:       decision.extracted?.reason || null,
         }
       });
       const fields = decision.fields.join(' و ');
@@ -122,7 +121,6 @@ async function execute(decision, clinic, patient, patientPhone) {
         booking_substate: 'awaiting_info',
         partial_booking: {
           patient_name: decision.extracted?.patient_name || null,
-          reason:       decision.extracted?.reason || null,
         }
       });
       let msg = '';
@@ -265,7 +263,6 @@ async function execute(decision, clinic, patient, patientPhone) {
         booking_substate: 'awaiting_date',
         partial_booking: {
           patient_name: decision.extracted?.patient_name || null,
-          reason:       decision.extracted?.reason || null,
         }
       });
       return `${dayInfo.displayDate} الدكتور غير متوفر ولا يوجد بديل. تكدر تحجز يوم ثاني؟`;
@@ -276,7 +273,6 @@ async function execute(decision, clinic, patient, patientPhone) {
         booking_substate: 'awaiting_date',
         partial_booking: {
           patient_name: decision.extracted?.patient_name || null,
-          reason:       decision.extracted?.reason || null,
         }
       });
       return 'انتهى دوام العيادة اليوم 🕐\nتكدر تحجز ليوم ثاني؟ قولي أي يوم يناسبك.';
@@ -288,7 +284,6 @@ async function execute(decision, clinic, patient, patientPhone) {
         booking_substate: 'awaiting_date',
         partial_booking: {
           patient_name: decision.extracted?.patient_name || null,
-          reason:       decision.extracted?.reason || null,
         }
       });
       return `عذراً، اكتمل العدد ليوم ${dayInfo.displayDate}. جرب يوماً آخر.`;
@@ -361,7 +356,7 @@ async function doBooking(decision, clinic, patient) {
         duration_minutes: duration,
         queue_number:     queueNumber,
         status:           'scheduled',
-        reason:           extracted.reason,
+        reason:           null,
         patient_name:     extracted.patient_name,
         served_by:        servedBy,
       })
@@ -385,7 +380,6 @@ async function doBooking(decision, clinic, patient) {
       estimatedLine || null,
       workHoursLine || null,
       `👤 ${extracted.patient_name}`,
-      `📝 ${extracted.reason}`,
       `رقم الحجز: #${ref}`,
       'راجع العيادة بهذا اليوم وبيكون دورك حسب رقمك.',
     ].filter(Boolean).join('\n');

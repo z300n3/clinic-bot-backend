@@ -107,7 +107,6 @@ function decide(extracted, checks, currentState, stateData) {
     const missing = [];
     if (!extracted.patient_name)    missing.push('الاسم الثنائي للمريض');
     if (!extracted.date_preference) missing.push('اليوم المطلوب للحجز');
-    if (!extracted.reason)          missing.push('سبب الزيارة');
 
     if (missing.length > 0)
       return { action: 'ASK_MISSING', fields: missing, extracted, answer: checks.combinedAnswer };

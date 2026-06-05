@@ -9,13 +9,13 @@ async function extractIntent(userMessage, currentState, stateData) {
   const isYes = /^(نعم|اي|إي|صح|اكيد|أكيد|تمام|زين|موافق|ي|yep|yes|ok)[.!?]*$/i.test(msg);
   const isNo  = /^(لا|كلا|خطأ|غلط|مو صح|غير|بدل|no|nope|cancel)[.!?]*$/i.test(msg);
   
-  if (isYes) return { intent: 'confirmation', patient_name: null, date_preference: null, reason: null, faq_topic: null };
-  if (isNo)  return { intent: 'rejection',    patient_name: null, date_preference: null, reason: null, faq_topic: null };
+  if (isYes) return { intent: 'confirmation', patient_name: null, date_preference: null, faq_topic: null };
+  if (isNo)  return { intent: 'rejection',    patient_name: null, date_preference: null, faq_topic: null };
 
   // Fast-path: detect greeting without AI
   const greetingRegex = /^(مرحبا|السلام عليكم|هلو|هلا|شلونك|كيفك|مرحباً|صباح الخير|مساء الخير|صباح النور|مساء النور)[.!?،\s]*$/i;
   if (greetingRegex.test(msg)) {
-    return { intent: 'greeting', patient_name: null, date_preference: null, reason: null, faq_topic: null };
+    return { intent: 'greeting', patient_name: null, date_preference: null, faq_topic: null };
   }
 
   const dateOnlyRegex = /^(باجر|بكره|غداً|غدا|اليوم|بعد غد|بعد بكره|الاثنين|الثلاثاء|الاربعاء|الخميس|الجمعة|السبت|الاحد)[.!?،\s]*$/i;
@@ -24,7 +24,6 @@ async function extractIntent(userMessage, currentState, stateData) {
       intent: 'booking', 
       patient_name: null, 
       date_preference: msg.trim(), 
-      reason: null, 
       faq_topic: null 
     };
   }
@@ -34,7 +33,7 @@ async function extractIntent(userMessage, currentState, stateData) {
   // Fast-path: medical advice (reject immediately)
   const medicalRegex = /^.*(وصف|وصفلي|اعطني|شنو علاج|شنو دواء|كيف اعالج).*(دواء|علاج|حبوب)/i;
   if (medicalRegex.test(msg)) {
-    return { intent: 'medical_advice', patient_name: null, date_preference: null, reason: null, faq_topic: null };
+    return { intent: 'medical_advice', patient_name: null, date_preference: null, faq_topic: null };
   }
 
   // AI extraction for everything else
@@ -47,7 +46,6 @@ async function extractIntent(userMessage, currentState, stateData) {
   "intent": "booking (للحجز) | cancellation (لإلغاء حجز محدد) | cancel_all (لإلغاء جميع حجوزاتي) | inquiry (للاستفسار) | check_appointment (للسؤال عن مواعيدي) | greeting (ترحيب) | escalate_to_doctor (يريد الطبيب / رفع تحليل / متابعة علاج) | unclear (غير واضح)",
   "patient_name": "الاسم الكامل أو null — فقط إذا ذُكر صراحةً",
   "date_preference": "التاريخ أو اليوم أو null",
-  "reason": "سبب الزيارة أو null",
   "faq_topics": ["topic1", "topic2"] 
 }
 ملاحظة للـ faq_topics: استبدل ["topic1", "topic2"] بمصفوفة المواضيع المطلوبة من هذه القائمة (hours, absence, price, location, specialty, services, about, doctor_name, custom)، أو ضع مصفوفة فارغة [] إذا لم يكن هناك سؤال.
@@ -55,7 +53,6 @@ async function extractIntent(userMessage, currentState, stateData) {
 قواعد:
 - patient_name: اسم شخص فقط (كلمة أو كلمتين تبدو كاسم). لا تضع جمل.
 - date_preference: أي إشارة زمنية (باجر، الخميس، هاي الأسبوع، اليوم...).
-- reason: الشكوى الطبية أو سبب الزيارة.
 - faq_topics: **تنبيه هام جداً**: استخرج **جميع** المواضيع التي سأل عنها المريض بدون استثناء. إذا احتوت الرسالة على عدة أسئلة (مثل السعر والعنوان والدوام)، يجب أن تحتوي المصفوفة على جميع هذه المواضيع ["price", "location", "hours"].
   * specialty: إذا سأل عن تخصص الطبيب، شنو يعالج، هل يعالج مرض كذا، أو الأمراض التي يعالجها.
   * price: حصراً إذا سأل عن مقدار السعر، كم الكشفية، أو التكلفة. إذا سأل عن (طرق الدفع، بطاقة، زين كاش، تأمين) فاختر custom.
@@ -109,7 +106,7 @@ async function extractIntent(userMessage, currentState, stateData) {
           : 'الخادم لم يُرجع شيئاً (timeout أو خطأ داخلي)'
       });
       trackTokenUsage(userMessage, 'unclear', finishReason, usage, false);
-      return { intent: 'unclear', patient_name: null, date_preference: null, reason: null, faq_topic: null };
+      return { intent: 'unclear', patient_name: null, date_preference: null, faq_topic: null };
     }
 
     // Extract JSON block even if there is surrounding text
@@ -124,7 +121,7 @@ async function extractIntent(userMessage, currentState, stateData) {
     if (!clean) {
       logger.error('[Extract] ❌ No JSON found in response', { userMessage, rawText: text });
       trackTokenUsage(userMessage, 'unclear', finishReason, usage, false);
-      return { intent: 'unclear', patient_name: null, date_preference: null, reason: null, faq_topic: null };
+      return { intent: 'unclear', patient_name: null, date_preference: null, faq_topic: null };
     }
 
     try {
@@ -144,7 +141,7 @@ async function extractIntent(userMessage, currentState, stateData) {
       status: err.status || err.statusCode || 'N/A',
       type: err.type || 'N/A'
     });
-    return { intent: 'unclear', patient_name: null, date_preference: null, reason: null, faq_topic: null };
+    return { intent: 'unclear', patient_name: null, date_preference: null, faq_topic: null };
   }
 }
 
