@@ -667,7 +667,7 @@ function parseArabicDatePreference(pref, now) {
   }
 
   // Day after tomorrow (check BEFORE tomorrow to avoid partial match)
-  if (lower.includes('بعد غد') || lower.includes('بعد بكره') || lower.includes('بعد باجر')) {
+  if (lower.includes('بعد غد') || lower.includes('بعد بكره') || lower.includes('بعد باجر') || lower.includes('عگب باجر') || lower.includes('عقب باجر')) {
     return now.add(2, 'day');
   }
 

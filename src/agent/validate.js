@@ -230,15 +230,44 @@ async function validateExtracted(extracted, clinic, patient, stateData, userMess
 async function checkDayInfo(datePreference, clinic) {
   const { getBaghdadNow, dayjs, TIMEZONE } = require('../utils/time');
   const { parseArabicDatePreference } = require('./tools');
+  const logger = require('../utils/logger');
   
   const now = getBaghdadNow();
-  const targetDay = parseArabicDatePreference(datePreference, now).startOf('day');
+  const lower = (datePreference || '').toLowerCase().trim();
+  const isASAP = lower.includes('اقرب موعد') || lower.includes('اسرع وقت') || lower.includes('أقرب موعد') || lower.includes('أسرع وقت') || lower.includes('asap');
 
-  if (!targetDay.isValid()) {
-    logger.error('[Validate] Invalid date from preference', { datePreference });
-    return null; // decide.js will treat null dayInfo as "ask for date"
+  if (isASAP) {
+    for (let i = 0; i < 14; i++) {
+      const targetDay = now.clone().add(i, 'day').startOf('day');
+      const info = await evaluateSingleDay(targetDay, clinic, now);
+      
+      if (info && info.isWorking && !info.isBlocked && !info.isFull && !info.shiftEnded) {
+        if (i === 0) {
+          const shift0 = info.shifts[0];
+          if (shift0 && shift0.close) {
+             const [ch, cm] = shift0.close.split(':').map(Number);
+             const shiftCloseMinutes = ch * 60 + cm;
+             const nowMinutes = now.hour() * 60 + now.minute();
+             if (shiftCloseMinutes - nowMinutes < 180) {
+                continue; // Skip today if less than 3 hours left
+             }
+          }
+        }
+        return info;
+      }
+    }
+    return null; // no available days found
+  } else {
+    const targetDay = parseArabicDatePreference(datePreference, now).startOf('day');
+    if (!targetDay.isValid()) {
+      logger.error('[Validate] Invalid date from preference', { datePreference });
+      return null; 
+    }
+    return await evaluateSingleDay(targetDay, clinic, now);
   }
+}
 
+async function evaluateSingleDay(targetDay, clinic, now) {
   const dayStartISO = targetDay.toISOString();
   const dayEndISO   = targetDay.endOf('day').toISOString();
   const dateStr     = targetDay.format('YYYY-MM-DD');
@@ -269,11 +298,9 @@ async function checkDayInfo(datePreference, clinic) {
   const blocks    = blocksRes.data    || [];
   const booked    = (bookedRes.data || []).length;
 
-  // Get day config
   const { getDayConfig } = require('./tools');
   const { isWorking, capacity, shifts } = getDayConfig(targetDay, schedules, clinic.working_hours || {});
 
-  // Check block + substitute
   const block = getBlockForDay(targetDay, blocks);
   const substitute = block?.substitute_doctor_name || null;
   const isBlocked  = !!block && !substitute;
@@ -281,7 +308,6 @@ async function checkDayInfo(datePreference, clinic) {
   const unlimited = capacity === null || capacity === undefined;
   const isFull    = !unlimited && booked >= capacity;
 
-  // Check if today's shift ended
   const shift0 = shifts[0];
   let shiftEnded = false;
   if (dateStr === now.format('YYYY-MM-DD')) {
