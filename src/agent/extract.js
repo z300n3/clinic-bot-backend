@@ -43,7 +43,7 @@ async function extractIntent(userMessage, currentState, stateData) {
 رسالة المريض: "${userMessage}"
 
 {
-  "intent": "booking (للحجز) | cancellation (لإلغاء حجز محدد) | cancel_all (لإلغاء جميع حجوزاتي) | inquiry (للاستفسار) | check_appointment (للسؤال عن مواعيدي) | greeting (ترحيب) | escalate_to_doctor (يريد الطبيب / رفع تحليل / متابعة علاج) | unclear (غير واضح)",
+  "intent": "booking (للحجز) | cancellation (لإلغاء حجز محدد) | cancel_all (لإلغاء جميع حجوزاتي) | inquiry (للاستفسار) | check_appointment (للسؤال عن مواعيدي) | greeting (ترحيب) | escalate_to_doctor (يريد الطبيب / رفع تحليل / متابعة علاج) | confirmation (للموافقة وتأكيد الحجز) | rejection (للرفض أو إخبار البوت أن المعلومات خاطئة) | unclear (غير واضح)",
   "patient_name": "الاسم الكامل أو null — فقط إذا ذُكر صراحةً",
   "date_preference": "التاريخ أو اليوم أو null",
   "faq_topics": ["topic1", "topic2"] 
@@ -65,6 +65,9 @@ async function extractIntent(userMessage, currentState, stateData) {
   * custom: أي سؤال عام عن العيادة لا يندرج تحت التصنيفات السابقة.
 - ملاحظة هامة جداً للأسئلة المزدوجة (حجز + استفسار):
   إذا احتوت الرسالة على طلب حجز وسؤال استفساري في نفس الوقت (مثل: "اريد حجز وكم السعر؟")، يجب أن تختار دائماً intent = "booking"، وتستخرج المواضيع المطلوبة وتضعها في faq_topics. إياك أن تختار "unclear" إذا كان هناك حجز واضح.
+- ملاحظة لنية التأكيد والرفض:
+  * confirmation: اخترها إذا كان المريض يؤكد صحة معلومات سأله عنها البوت (نعم، صحيح، بالضبط، موافق).
+  * rejection: اخترها إذا كان المريض ينفي صحة المعلومات أو يصحح خطأ (لا، الاسم غلط، مو هيج، غير الموعد).
 - ملاحظة هامة: إذا كانت الحالة الحالية (awaiting_info أو awaiting_date أو awaiting_cancel_select):
   1. أولاً، تأكد ما إذا كانت الرسالة سؤالاً استفسارياً واضحاً (عن السعر، المكان، الاختصاص، الخ). إذا كانت كذلك، اجعل intent = "inquiry" واستخرج faq_topics المناسبة.
   2. ثانياً، إذا لم تكن سؤالاً بل نصاً قصيراً (اسم، يوم، شكوى مرضية)، افترض أنه إجابة لإكمال الحجز أو إلغاء الموعد، واجعل intent = "booking" أو "cancellation" وقم بتعبئة الحقل المناسب (مثل patient_name).
