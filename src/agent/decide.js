@@ -21,12 +21,14 @@ function decide(extracted, checks, currentState, stateData) {
     if (currentState === 'awaiting_cancel_all_confirm')
       return { action: 'DO_CANCEL_ALL', data: stateData };
     if (currentState === 'awaiting_voice_confirm')
-      return { action: 'DO_VOICE_BOOK', data: stateData };
+      return { action: 'DO_VOICE_BOOK', data: stateData, newExtracted: extracted };
+    if (currentState === 'awaiting_reschedule_confirm')
+      return { action: 'DO_RESCHEDULE', data: stateData };
     return { action: 'UNCLEAR' };
   }
 
   if (intent === 'rejection') {
-    if (['awaiting_rebook_confirm','awaiting_cancel_confirm','awaiting_cancel_all_confirm'].includes(currentState))
+    if (['awaiting_rebook_confirm','awaiting_cancel_confirm','awaiting_cancel_all_confirm','awaiting_reschedule_confirm'].includes(currentState))
       return { action: 'CANCEL_FLOW' };
     if (currentState === 'awaiting_voice_confirm')
       return { action: 'REJECT_VOICE_BOOK' };
@@ -35,15 +37,52 @@ function decide(extracted, checks, currentState, stateData) {
 
   // ── Awaiting Cancel Select ──────────────────────────────────────────────────
   if (currentState === 'awaiting_cancel_select') {
+    const appts = stateData.cancel_appts || [];
+    const rawNum = parseInt((extracted.patient_name || extracted.userMessage || '').trim(), 10);
+    if (!isNaN(rawNum) && rawNum >= 1 && rawNum <= appts.length) {
+      return { action: 'CONFIRM_CANCEL', targetAppt: appts[rawNum - 1] };
+    }
     if (extracted.patient_name || intent === 'cancellation') {
       const targetName = (extracted.patient_name || '').trim().toLowerCase();
-      const appts = stateData.cancel_appts || [];
       const matched = appts.find(a => (a.patient_name || '').trim().toLowerCase() === targetName);
       if (matched) {
         return { action: 'CONFIRM_CANCEL', targetAppt: matched };
       }
     }
-    return { action: 'ASK_CANCEL_SELECT', appts: stateData.cancel_appts || [] };
+    return { action: 'ASK_CANCEL_SELECT', appts };
+  }
+
+  // ── Awaiting Reschedule Select ──────────────────────────────────────────────
+  if (currentState === 'awaiting_reschedule_select') {
+    const appts = stateData.reschedule_appts || [];
+    const rawNum = parseInt((extracted.patient_name || extracted.userMessage || '').trim(), 10);
+    if (!isNaN(rawNum) && rawNum >= 1 && rawNum <= appts.length) {
+      return { action: 'ASK_RESCHEDULE_DATE', targetAppt: appts[rawNum - 1] };
+    }
+    if (extracted.patient_name || intent === 'reschedule') {
+      const targetName = (extracted.patient_name || '').trim().toLowerCase();
+      const matched = appts.find(a => (a.patient_name || '').trim().toLowerCase() === targetName);
+      if (matched) {
+        return { action: 'ASK_RESCHEDULE_DATE', targetAppt: matched };
+      }
+    }
+    return { action: 'ASK_RESCHEDULE_SELECT', appts };
+  }
+
+  // ── Awaiting Reschedule Date ──────────────────────────────────────────────
+  if (currentState === 'awaiting_reschedule_date') {
+    const targetAppt = stateData.targetAppt;
+    if (!extracted.date_preference || String(extracted.date_preference).toLowerCase() === 'null') {
+      return { action: 'ASK_RESCHEDULE_DATE', targetAppt };
+    }
+    if (checks.dayInfo) {
+      const d = checks.dayInfo;
+      if (!d.isWorking || d.isBlocked || d.shiftEnded || d.isFull) {
+        return { action: 'RESCHEDULE_DAY_UNAVAILABLE', dayInfo: d, targetAppt };
+      }
+      return { action: 'ASK_RESCHEDULE_CONFIRM', targetAppt, dayInfo: d };
+    }
+    return { action: 'ASK_RESCHEDULE_DATE', targetAppt };
   }
 
   // ── Greeting ──────────────────────────────────────────────────────────────
@@ -103,6 +142,38 @@ function decide(extracted, checks, currentState, stateData) {
     }
     
     return { action: 'ASK_CANCEL_SELECT', appts: checks.upcomingAppts };
+  }
+
+  // ── Reschedule ────────────────────────────────────────────────────────────
+  if (intent === 'reschedule') {
+    if (checks.upcomingAppts.length === 0)
+      return { action: 'NO_APPOINTMENTS' };
+      
+    let targetAppt = null;
+    if (checks.upcomingAppts.length === 1) {
+      targetAppt = checks.upcomingAppts[0];
+    } else if (extracted.patient_name) {
+      const targetName = extracted.patient_name.trim().toLowerCase();
+      targetAppt = checks.upcomingAppts.find(a => (a.patient_name || '').trim().toLowerCase() === targetName);
+    }
+
+    if (!targetAppt) {
+      return { action: 'ASK_RESCHEDULE_SELECT', appts: checks.upcomingAppts };
+    }
+
+    if (!extracted.date_preference || String(extracted.date_preference).toLowerCase() === 'null') {
+      return { action: 'ASK_RESCHEDULE_DATE', targetAppt };
+    }
+
+    if (checks.dayInfo) {
+      const d = checks.dayInfo;
+      if (!d.isWorking || d.isBlocked || d.shiftEnded || d.isFull) {
+        return { action: 'RESCHEDULE_DAY_UNAVAILABLE', dayInfo: d, targetAppt };
+      }
+      return { action: 'ASK_RESCHEDULE_CONFIRM', targetAppt, dayInfo: d };
+    }
+
+    return { action: 'ASK_RESCHEDULE_DATE', targetAppt };
   }
 
   // ── Booking ───────────────────────────────────────────────────────────────

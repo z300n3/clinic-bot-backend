@@ -223,6 +223,71 @@ async function execute(decision, clinic, patient, patientPhone) {
       return 'تم إلغاء جميع مواعيدك بنجاح ✅';
     }
 
+    // ── Reschedule ────────────────────────────────────────────────────────────
+    case 'ASK_RESCHEDULE_SELECT': {
+      await upsertConversationState(clinic.id, patientPhone, 'active', {
+        booking_substate: 'awaiting_reschedule_select',
+        reschedule_appts: decision.appts
+      });
+      const lines = decision.appts.map(a => {
+        const d = dayjs(a.scheduled_at).tz(TIMEZONE);
+        const dateStr = `${d.date()}/${d.month()+1}`;
+        return `🔹 ${a.patient_name || 'بدون اسم'} (يوم ${dateStr})`;
+      });
+      return `عندك أكثر من موعد قادم:\n${lines.join('\n')}\n\nاكتب رقم أو اسم الموعد اللي تريد تأجله.`;
+    }
+
+    case 'ASK_RESCHEDULE_DATE': {
+      await upsertConversationState(clinic.id, patientPhone, 'active', {
+        booking_substate: 'awaiting_reschedule_date',
+        targetAppt: decision.targetAppt
+      });
+      return `لأي يوم تحب نأجل موعد "${decision.targetAppt.patient_name}"؟`;
+    }
+
+    case 'RESCHEDULE_DAY_UNAVAILABLE': {
+      await upsertConversationState(clinic.id, patientPhone, 'active', {
+        booking_substate: 'awaiting_reschedule_date',
+        targetAppt: decision.targetAppt
+      });
+      return `${decision.dayInfo.displayDate} غير متاح (عطلة أو العدد مكتمل) 😔. جرب يوم ثاني؟`;
+    }
+
+    case 'ASK_RESCHEDULE_CONFIRM': {
+      await upsertConversationState(clinic.id, patientPhone, 'active', {
+        booking_substate: 'awaiting_reschedule_confirm',
+        targetAppt: decision.targetAppt,
+        dayInfo: decision.dayInfo
+      });
+      const oldDate = dayjs(decision.targetAppt.scheduled_at).tz(TIMEZONE);
+      const oldDateStr = `${oldDate.date()}/${oldDate.month()+1}`;
+      return `تريد تأجل موعد "${decision.targetAppt.patient_name}" من يوم ${oldDateStr} إلى ${decision.dayInfo.displayDate}؟ (نعم / لا)`;
+    }
+
+    case 'DO_RESCHEDULE': {
+      const { targetAppt, dayInfo } = decision.data || {};
+      if (!targetAppt || !dayInfo) {
+         await upsertConversationState(clinic.id, patientPhone, 'active', {});
+         return 'عذراً، صارت مشكلة بالتأجيل. ممكن تحاول مرة ثانية؟';
+      }
+
+      // Cancel old appt
+      await supabase.from('appointments')
+        .update({ status: 'cancelled', cancelled_at: new Date().toISOString() })
+        .eq('id', targetAppt.id);
+
+      // Book new appt
+      const fakeDecision = {
+        extracted: { patient_name: targetAppt.patient_name, date_preference: dayInfo.dateStr },
+        dayInfo
+      };
+      
+      const result = await doBooking(fakeDecision, clinic, patient, patientPhone);
+      await upsertConversationState(clinic.id, patientPhone, 'active', { booking_substate: 'idle' });
+      
+      return `تم تأجيل الموعد بنجاح ✅\n\n${result}`;
+    }
+
     case 'CONFIRM_REBOOK': {
       const { existingAppt } = decision;
       const d = dayjs(existingAppt.scheduled_at).tz(TIMEZONE);
@@ -271,6 +336,35 @@ async function execute(decision, clinic, patient, patientPhone) {
         await upsertConversationState(clinic.id, patientPhone, 'active', {});
         return 'عذراً، انتهت صلاحية الطلب. ممكن تطلب الحجز مرة ثانية؟';
       }
+
+      // Check for corrections in the confirmation response
+      const ne = decision.newExtracted || {};
+      const hasDateFix = ne.date_preference && String(ne.date_preference).toLowerCase() !== 'null';
+      const hasNameFix = ne.patient_name && String(ne.patient_name).toLowerCase() !== 'null';
+
+      if (hasDateFix || hasNameFix) {
+        const updatedExtracted = { ...pending_booking.extracted };
+        if (hasNameFix) updatedExtracted.patient_name = ne.patient_name;
+        if (hasDateFix) updatedExtracted.date_preference = ne.date_preference;
+
+        const { validateExtracted } = require('./validate');
+        const checks = await validateExtracted(updatedExtracted, clinic, patient, {}, '');
+
+        if (!checks.dayInfo) {
+          await upsertConversationState(clinic.id, patientPhone, 'active', {});
+          return 'عذراً، اليوم الجديد غير متاح للحجز. ممكن تطلب الحجز مرة ثانية مع يوم مختلف؟';
+        }
+
+        await upsertConversationState(clinic.id, patientPhone, 'active', {
+          booking_substate: 'awaiting_voice_confirm',
+          pending_booking: {
+            extracted: updatedExtracted,
+            dayInfo: checks.dayInfo
+          }
+        });
+        return `تمام عدّلت المعلومات! الحجز باسم "${updatedExtracted.patient_name}" ليوم ${checks.dayInfo.displayDate}. هل المعلومات صحيحة الآن؟ (نعم / لا)`;
+      }
+
       const fakeDecision = {
         extracted: pending_booking.extracted,
         dayInfo: pending_booking.dayInfo

@@ -8,9 +8,11 @@ async function extractIntent(userMessage, currentState, stateData) {
   
   const isYes = /^(نعم|اي|إي|صح|اكيد|أكيد|تمام|زين|موافق|ي|yep|yes|ok)[.!?]*$/i.test(msg);
   const isNo  = /^(لا|كلا|خطأ|غلط|مو صح|غير|بدل|no|nope|cancel)[.!?]*$/i.test(msg);
+  const isReschedule = /^(اجل موعدي|تأجيل|تأجيل موعدي|تأجيل الموعد|غير موعدي|تغيير موعدي|تغيير الموعد|تأخير الموعد)[.!?]*$/i.test(msg);
   
   if (isYes) return { intent: 'confirmation', patient_name: null, date_preference: null, faq_topic: null };
   if (isNo)  return { intent: 'rejection',    patient_name: null, date_preference: null, faq_topic: null };
+  if (isReschedule) return { intent: 'reschedule', patient_name: null, date_preference: null, faq_topic: null };
 
   // Fast-path: detect greeting without AI
   const greetingRegex = /^(مرحبا|السلام عليكم|هلو|هلا|شلونك|كيفك|مرحباً|صباح الخير|مساء الخير|صباح النور|مساء النور)[.!?،\s]*$/i;
@@ -43,7 +45,7 @@ async function extractIntent(userMessage, currentState, stateData) {
 رسالة المريض: "${userMessage}"
 
 {
-  "intent": "booking (للحجز) | cancellation (لإلغاء حجز محدد) | cancel_all (لإلغاء جميع حجوزاتي) | inquiry (للاستفسار) | check_appointment (للسؤال عن مواعيدي) | greeting (ترحيب) | escalate_to_doctor (يريد الطبيب / رفع تحليل / متابعة علاج) | confirmation (للموافقة وتأكيد الحجز) | rejection (للرفض أو إخبار البوت أن المعلومات خاطئة) | unclear (غير واضح)",
+  "intent": "booking (للحجز) | cancellation (لإلغاء حجز محدد) | cancel_all (لإلغاء جميع حجوزاتي) | reschedule (لتأجيل أو تغيير أو نقل موعد قائم ليوم آخر) | inquiry (للاستفسار) | check_appointment (للسؤال عن مواعيدي) | greeting (ترحيب) | escalate_to_doctor (يريد الطبيب / رفع تحليل / متابعة علاج) | confirmation (للموافقة وتأكيد الحجز) | rejection (للرفض أو إخبار البوت أن المعلومات خاطئة) | unclear (غير واضح)",
   "patient_name": "الاسم الكامل أو null — فقط إذا ذُكر صراحةً",
   "date_preference": "التاريخ أو اليوم أو null",
   "faq_topics": ["topic1", "topic2"] 
@@ -68,9 +70,9 @@ async function extractIntent(userMessage, currentState, stateData) {
 - ملاحظة لنية التأكيد والرفض:
   * confirmation: اخترها إذا كان المريض يؤكد صحة معلومات سأله عنها البوت (نعم، صحيح، بالضبط، موافق).
   * rejection: اخترها إذا كان المريض ينفي صحة المعلومات أو يصحح خطأ (لا، الاسم غلط، مو هيج، غير الموعد).
-- ملاحظة هامة: إذا كانت الحالة الحالية (awaiting_info أو awaiting_date أو awaiting_cancel_select):
+- ملاحظة هامة: إذا كانت الحالة الحالية (awaiting_info أو awaiting_date أو awaiting_cancel_select أو awaiting_reschedule_select أو awaiting_reschedule_date):
   1. أولاً، تأكد ما إذا كانت الرسالة سؤالاً استفسارياً واضحاً (عن السعر، المكان، الاختصاص، الخ). إذا كانت كذلك، اجعل intent = "inquiry" واستخرج faq_topics المناسبة.
-  2. ثانياً، إذا لم تكن سؤالاً بل نصاً قصيراً (اسم، يوم، شكوى مرضية)، افترض أنه إجابة لإكمال الحجز أو إلغاء الموعد، واجعل intent = "booking" أو "cancellation" وقم بتعبئة الحقل المناسب (مثل patient_name).
+  2. ثانياً، إذا لم تكن سؤالاً بل نصاً قصيراً (اسم، يوم، شكوى مرضية)، افترض أنه إجابة لإكمال الحجز أو إلغاء الموعد أو تأجيله، واجعل intent بناءً على السياق (مثل "reschedule" إذا كان المطلوب تاريخاً جديداً للتأجيل، أو "cancellation" لاختيار موعد للإلغاء) وقم بتعبئة الحقل المناسب.
 - ملاحظة للفلترة (Gate): إذا كان المريض يصف مشكلته أو أعراضه (وليس يطلب حجز موعد صراحةً)، لا تصنفها booking. booking فقط إذا طلب الحجز بوضوح (احجزلي، اريد موعد).`
 
   try {

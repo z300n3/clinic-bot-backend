@@ -55,7 +55,7 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
     }
 
     // 4b. Strong NEW intent → leave gate and process new request
-    const strongIntents = ['booking', 'cancellation', 'cancel_all', 'check_appointment'];
+    const strongIntents = ['booking', 'cancellation', 'cancel_all', 'check_appointment', 'reschedule'];
     if (strongIntents.includes(extracted.intent)) {
       await upsertConversationState(clinic.id, patientPhone, 'active', {});
       const checks = await validateExtracted(extracted, clinic, patient, {}, userMessage);
@@ -78,7 +78,7 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
 
   // 5. doctor_pending handling (unchanged hybrid logic)
   if (currentState === 'doctor_pending') {
-    if (['booking', 'inquiry', 'check_appointment', 'greeting', 'cancellation', 'cancel_all'].includes(extracted.intent)) {
+    if (['booking', 'inquiry', 'check_appointment', 'greeting', 'cancellation', 'cancel_all', 'reschedule'].includes(extracted.intent)) {
       const checks = await validateExtracted(extracted, clinic, patient, stateData, userMessage);
       const decision = decide(extracted, checks, subState, stateData);
       const reply = await execute(decision, clinic, patient, patientPhone);
@@ -95,12 +95,13 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
 
   // 6. SUBSTATE ESCAPE — stale confirmation substate blocked by new intent
   const confirmSubstates = ['awaiting_cancel_confirm','awaiting_cancel_all_confirm',
-                            'awaiting_rebook_confirm','awaiting_cancel_select', 'awaiting_voice_confirm'];
-  const bookingSubstates = ['awaiting_info', 'awaiting_date'];
-  const escapeIntents = ['booking','escalate_to_doctor','cancellation','cancel_all','inquiry','check_appointment'];
+                            'awaiting_rebook_confirm','awaiting_cancel_select', 'awaiting_voice_confirm',
+                            'awaiting_reschedule_confirm', 'awaiting_reschedule_select'];
+  const bookingSubstates = ['awaiting_info', 'awaiting_date', 'awaiting_reschedule_date'];
+  const escapeIntents = ['booking','escalate_to_doctor','cancellation','cancel_all','inquiry','check_appointment','reschedule'];
 
-  // 6a. For booking substates (awaiting_info, awaiting_date): merge partial_booking with new data
-  if (bookingSubstates.includes(subState) && extracted.intent === 'booking') {
+  // 6a. For booking substates: merge partial data
+  if (bookingSubstates.includes(subState) && (extracted.intent === 'booking' || extracted.intent === 'reschedule')) {
     const partial = stateData.partial_booking || {};
     if (!extracted.patient_name && partial.patient_name) {
       extracted.patient_name = partial.patient_name;

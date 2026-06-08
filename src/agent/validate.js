@@ -207,8 +207,15 @@ async function validateExtracted(extracted, clinic, patient, stateData, userMess
     }
   }
 
-  // 5. Check patient's upcoming appointments
-  if (['check_appointment', 'cancellation', 'cancel_all'].includes(extracted.intent) || stateData.booking_substate === 'awaiting_cancel_select') {
+  const fetchApptSubstates = [
+    'awaiting_cancel_select', 
+    'awaiting_cancel_confirm', 
+    'awaiting_cancel_all_confirm',
+    'awaiting_reschedule_select', 
+    'awaiting_reschedule_date', 
+    'awaiting_reschedule_confirm'
+  ];
+  if (['check_appointment', 'cancellation', 'cancel_all', 'reschedule'].includes(extracted.intent) || fetchApptSubstates.includes(stateData.booking_substate)) {
     const now = getBaghdadNow();
     const { data } = await supabase
       .from('appointments')
