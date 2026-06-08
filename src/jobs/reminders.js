@@ -28,19 +28,16 @@ const GRAPH_BASE      = `https://graph.facebook.com/${GRAPH_API_VER}`;
 // ── sendReminders ─────────────────────────────────────────────────────────────
 
 async function sendReminders() {
-  logger.info('Reminders job: starting');
+  logger.info('Reminders job: starting smart free reminders');
 
   try {
-    const now   = new Date();
-    const in24h = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-    const in25h = new Date(now.getTime() + 25 * 60 * 60 * 1000);
+    const now = new Date();
 
-    // Fetch appointments due in the next 24-25 h window that haven't been reminded
+    // Fetch ALL active appointments that haven't been reminded
     const { data: appointments, error } = await supabase
       .from('appointments')
       .select('id, scheduled_at, patient_name, reason, patient_id, clinic_id')
-      .gte('scheduled_at', in24h.toISOString())
-      .lte('scheduled_at', in25h.toISOString())
+      .gt('scheduled_at', now.toISOString())
       .in('status', ['scheduled', 'confirmed'])
       .is('reminder_sent_at', null);
 
@@ -54,19 +51,21 @@ async function sendReminders() {
       return;
     }
 
-    logger.info(`Reminders: sending ${appointments.length} reminder(s)`);
+    let sentCount = 0;
 
     for (const appt of appointments) {
       try {
-        await processReminder(appt);
+        const sent = await processReminder(appt, now);
+        if (sent) sentCount++;
       } catch (err) {
-        // Don't let one failure block the rest
         logger.error('Reminders: failed for appointment', {
           apptId: appt.id,
           error:  err.message,
         });
       }
     }
+    
+    logger.info(`Reminders: finished, sent ${sentCount} reminder(s)`);
   } catch (err) {
     logger.error('Reminders job error', { error: err.message });
   }
@@ -74,7 +73,53 @@ async function sendReminders() {
 
 // ── processReminder ───────────────────────────────────────────────────────────
 
-async function processReminder(appt) {
+async function processReminder(appt, now) {
+  // Get patient's last message time from conversation_state
+  const { data: stateData } = await supabase
+    .from('conversation_state')
+    .select('last_message_at')
+    .eq('patient_id', appt.patient_id)
+    .eq('clinic_id', appt.clinic_id)
+    .single();
+
+  if (!stateData || !stateData.last_message_at) {
+    return false;
+  }
+
+  const lastMessageAt = new Date(stateData.last_message_at);
+  const msSinceLastMessage = now.getTime() - lastMessageAt.getTime();
+  const hoursSinceLastMessage = msSinceLastMessage / (1000 * 60 * 60);
+
+  // If the window is already closed, we can't send a free message
+  if (hoursSinceLastMessage >= 24) {
+    return false;
+  }
+
+  const scheduledAt = new Date(appt.scheduled_at);
+  const msUntilAppt = scheduledAt.getTime() - now.getTime();
+  const hoursUntilAppt = msUntilAppt / (1000 * 60 * 60);
+
+  let reminderType = null;
+  let messageText = '';
+  const timeFormatted = formatAppointmentTime(appt.scheduled_at);
+
+  // Condition 1: The 23-hour save (Appointment is far, window is closing)
+  // Give it a buffer from 22.5 to 23.9 hours to ensure the cron job catches it
+  if (hoursUntilAppt > 24 && hoursSinceLastMessage >= 22.5 && hoursSinceLastMessage < 24) {
+    reminderType = 'early_save';
+    messageText = `تذكير مبكر بموعدك 🔔\nتم تثبيت الموعد ليوم: ${timeFormatted}\n\nنتمنى لك دوام الصحة. إذا احتجت لأي مساعدة أخرى لا تتردد بمراسلتنا!`;
+  }
+  // Condition 2: Standard reminder (Appointment is close, window is open)
+  // We send this around 24h before the appointment, OR immediately if the appointment is very soon
+  else if (hoursUntilAppt <= 24 && hoursUntilAppt > 0 && hoursSinceLastMessage < 24) {
+    reminderType = 'standard';
+    messageText = `تذكير بموعدك القادم 🔔\n📅 ${timeFormatted}\n👤 ${appt.patient_name || 'غير محدد'}\n\nإذا تريد إلغاء الموعد كلمنا.`;
+  }
+
+  if (!reminderType) {
+    return false; // Conditions not met yet
+  }
+
   // Load patient phone
   const { data: patient } = await supabase
     .from('patients')
@@ -82,38 +127,25 @@ async function processReminder(appt) {
     .eq('id', appt.patient_id)
     .single();
 
-  if (!patient?.phone_number) {
-    logger.warn('Reminders: no phone for patient', { patientId: appt.patient_id });
-    return;
-  }
+  if (!patient?.phone_number) return false;
 
-  // Load clinic credentials + name
+  // Load clinic
   const { data: clinic } = await supabase
     .from('clinics')
     .select('name, address, meta_access_token, whatsapp_phone_number_id, whatsapp_setup_status')
     .eq('id', appt.clinic_id)
     .single();
 
-  if (!clinic) {
-    logger.warn('Reminders: clinic not found', { clinicId: appt.clinic_id });
-    return;
-  }
+  if (!clinic || clinic.whatsapp_setup_status !== 'completed') return false;
 
-  // Only send for activated clinics (WhatsApp fully set up)
-  if (clinic.whatsapp_setup_status !== 'completed' ||
-      !clinic.meta_access_token      ||
-      !clinic.whatsapp_phone_number_id) {
-    logger.info('Reminders: clinic WhatsApp not activated — skipping', { clinicId: appt.clinic_id });
-    return;
+  if (reminderType === 'standard' && clinic.address) {
+    messageText += `\n📍 ${clinic.address}`;
   }
-
-  const timeFormatted = formatAppointmentTime(appt.scheduled_at);
-  const message = `تذكير بموعدك 🔔\n📅 ${timeFormatted}\n👤 ${appt.patient_name || 'غير محدد'}\n📍 ${clinic.address}\n\nإذا تريد إلغاء الموعد كلمنا.`;
 
   await sendWhatsAppReminder(
     clinic.whatsapp_phone_number_id,
     patient.phone_number,
-    message,
+    messageText,
     clinic.meta_access_token
   );
 
@@ -123,11 +155,12 @@ async function processReminder(appt) {
     .update({ reminder_sent_at: new Date().toISOString() })
     .eq('id', appt.id);
 
-  logger.info('Reminder sent', {
+  logger.info(`Reminder sent (${reminderType})`, {
     apptId: appt.id,
     to:     patient.phone_number,
-    day:    timeFormatted,
   });
+
+  return true;
 }
 
 // ── sendWhatsAppReminder ──────────────────────────────────────────────────────
