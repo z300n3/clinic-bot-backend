@@ -114,6 +114,20 @@ async function validateExtracted(extracted, clinic, patient, stateData, userMess
     }
   }
 
+  // 2c. Check total active bookings for anti-spam limits
+  if (extracted.intent === 'booking') {
+    const now = getBaghdadNow();
+    const { count } = await supabase
+      .from('appointments')
+      .select('*', { count: 'exact', head: true })
+      .eq('clinic_id', clinic.id)
+      .eq('patient_id', patient.id)
+      .in('status', ['scheduled', 'confirmed'])
+      .gte('scheduled_at', now.toISOString());
+      
+    result.activeBookingsCount = count || 0;
+  }
+
   // Extract topics robustly
   let parsedTopics = [];
   if (Array.isArray(extracted.faq_topics)) {

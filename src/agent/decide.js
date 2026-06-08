@@ -190,6 +190,10 @@ function decide(extracted, checks, currentState, stateData) {
 
   // ── Booking ───────────────────────────────────────────────────────────────
   if (intent === 'booking') {
+    if (checks.activeBookingsCount >= 3) {
+      return { action: 'MAX_BOOKINGS_REACHED' };
+    }
+
     // Collect missing fields
     const missing = [];
     if (!extracted.patient_name) {

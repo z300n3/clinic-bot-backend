@@ -161,9 +161,21 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
   logger.info('[Pipeline] Decision', { action: decision.action });
 
   const reply = await execute(decision, clinic, patient, patientPhone);
-  await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
 
-  return reply;
+  const { count } = await supabase.from('messages')
+    .select('*', { count: 'exact', head: true })
+    .eq('patient_id', patient.id)
+    .eq('role', 'assistant');
+
+  let finalReply = reply;
+  if (count === 0) {
+    const welcome = `أهلاً بك! أنا المساعد الذكي لعيادة د. ${clinic.doctor_name || clinic.name} 🤖\nأقدر أساعدك في حجز، إلغاء، أو تأجيل موعدك. للاستشارات الطبية أو الأسئلة المعقدة، سيقوم الطبيب أو السكرتير بالرد عليك لاحقاً.\n\n---\n\n`;
+    finalReply = welcome + reply;
+  }
+
+  await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: finalReply });
+
+  return finalReply;
 }
 
 module.exports = { handleIncomingMessage };

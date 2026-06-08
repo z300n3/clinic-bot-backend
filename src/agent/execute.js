@@ -146,6 +146,9 @@ async function execute(decision, clinic, patient, patientPhone) {
     case 'NO_APPOINTMENTS':
       return 'ما عندك أي موعد قادم مسجل حالياً.';
 
+    case 'MAX_BOOKINGS_REACHED':
+      return 'عذراً، لديك 3 مواعيد نشطة حالياً وهذا هو الحد الأقصى المسموح به لكل مريض. 😔\nلا يمكنك حجز موعد جديد حتى تكمل مواعيدك الحالية أو تلغي أحدها.';
+
     case 'SHOW_APPOINTMENTS': {
       const { appts } = decision;
       const lines = appts.map(a => {

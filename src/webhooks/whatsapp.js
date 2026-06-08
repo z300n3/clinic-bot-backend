@@ -156,7 +156,23 @@ router.post('/', async (req, res) => {
 // Handles deduplication and starts/resets the debounce timer.
 // The heavy AI work is deferred to processDebounced().
 
+const messageRateLimiter = new Map();
+
 async function processMessage({ phoneNumberId, from, profileName, messageId, text, messageType, originalMediaId, mediaUrl }) {
+  const now = Date.now();
+  const timestamps = messageRateLimiter.get(from) || [];
+  const validTimestamps = timestamps.filter(t => now - t < 60000);
+  validTimestamps.push(now);
+  messageRateLimiter.set(from, validTimestamps);
+
+  if (validTimestamps.length > 15) {
+    if (validTimestamps.length === 16) {
+      logger.warn('Rate limit exceeded for user', { from });
+      await sendWhatsAppMessage(phoneNumberId, from, 'عذراً، يبدو أنك ترسل رسائل بسرعة كبيرة جداً. يرجى الانتظار قليلاً قبل المحاولة مجدداً. ⏳').catch(() => {});
+    }
+    return;
+  }
+
   logger.info('Processing message', {
     from,
     messageId,
