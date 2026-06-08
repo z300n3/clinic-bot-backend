@@ -96,7 +96,7 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
   // 6. SUBSTATE ESCAPE — stale confirmation substate blocked by new intent
   const confirmSubstates = ['awaiting_cancel_confirm','awaiting_cancel_all_confirm',
                             'awaiting_rebook_confirm','awaiting_cancel_select', 'awaiting_voice_confirm',
-                            'awaiting_reschedule_confirm', 'awaiting_reschedule_select'];
+                            'awaiting_reschedule_confirm', 'awaiting_reschedule_select', 'awaiting_name_confirm'];
   const bookingSubstates = ['awaiting_info', 'awaiting_date', 'awaiting_reschedule_date'];
   const escapeIntents = ['booking','escalate_to_doctor','cancellation','cancel_all','inquiry','check_appointment','reschedule'];
 
@@ -112,7 +112,21 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
     // Keep substate so pipeline continues normally
   }
 
-  // 6b. For confirmation substates: escape if new strong intent
+  // 6b. Special handling for awaiting_name_confirm
+  if (subState === 'awaiting_name_confirm') {
+    if (extracted.intent === 'confirmation') {
+      extracted.intent = 'booking';
+      extracted.patient_name = stateData.recentName;
+      extracted.date_preference = extracted.date_preference || stateData.datePref;
+    } else if (extracted.intent === 'rejection') {
+      extracted.intent = 'booking';
+      extracted.patient_name = null;
+      extracted.date_preference = extracted.date_preference || stateData.datePref;
+      stateData.ignoreRecentName = true;
+    }
+  }
+
+  // 6c. For confirmation substates: escape if new strong intent
   if (confirmSubstates.includes(subState) &&
       extracted.intent !== 'confirmation' &&
       extracted.intent !== 'rejection' &&

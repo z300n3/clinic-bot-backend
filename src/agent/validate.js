@@ -97,6 +97,23 @@ async function validateExtracted(extracted, clinic, patient, stateData, userMess
     result.existingAppt = data || null;
   }
 
+  // 2b. Fetch recent patient name if missing (Context Retention)
+  if (extracted.intent === 'booking' && !extracted.patient_name && !stateData.ignoreRecentName && ['idle', 'awaiting_info'].includes(stateData.booking_substate || 'idle')) {
+    const { data: recentAppt } = await supabase
+      .from('appointments')
+      .select('patient_name')
+      .eq('clinic_id', clinic.id)
+      .eq('patient_id', patient.id)
+      .not('patient_name', 'is', null)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+      
+    if (recentAppt && recentAppt.patient_name) {
+      result.recentPatientName = recentAppt.patient_name;
+    }
+  }
+
   // Extract topics robustly
   let parsedTopics = [];
   if (Array.isArray(extracted.faq_topics)) {
@@ -225,7 +242,7 @@ async function validateExtracted(extracted, clinic, patient, stateData, userMess
       .in('status', ['scheduled', 'confirmed'])
       .gte('scheduled_at', now.toISOString())
       .order('scheduled_at', { ascending: true })
-      .limit(3);
+      .limit(10);
 
     result.upcomingAppts = data || [];
   }

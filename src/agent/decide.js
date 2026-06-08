@@ -192,7 +192,12 @@ function decide(extracted, checks, currentState, stateData) {
   if (intent === 'booking') {
     // Collect missing fields
     const missing = [];
-    if (!extracted.patient_name)    missing.push('الاسم الثنائي للمريض');
+    if (!extracted.patient_name) {
+      if (checks.recentPatientName) {
+        return { action: 'ASK_NAME_CONFIRM', recentName: checks.recentPatientName, datePref: extracted.date_preference };
+      }
+      return { action: 'ASK_FULL_NAME' };
+    }
     if (!extracted.date_preference) missing.push('اليوم المطلوب للحجز');
 
     if (missing.length > 0)

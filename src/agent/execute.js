@@ -117,6 +117,18 @@ async function execute(decision, clinic, patient, patientPhone) {
       return msg;
     }
 
+    case 'ASK_NAME_CONFIRM': {
+      await upsertConversationState(clinic.id, patientPhone, 'active', {
+        booking_substate: 'awaiting_name_confirm',
+        recentName: decision.recentName,
+        datePref: decision.datePref,
+        partial_booking: {
+          date_preference: decision.datePref
+        }
+      });
+      return `أهلاً بك مجدداً! 😊\nهل تحب تحجز بنفس الاسم السابق (${decision.recentName})؟ (نعم / لا)`;
+    }
+
     case 'ASK_FULL_NAME': {
       await upsertConversationState(clinic.id, patientPhone, 'active', {
         booking_substate: 'awaiting_info',
