@@ -55,15 +55,27 @@ function decide(extracted, checks, currentState, stateData) {
   // ── Awaiting Reschedule Select ──────────────────────────────────────────────
   if (currentState === 'awaiting_reschedule_select') {
     const appts = stateData.reschedule_appts || [];
+    
+    const handleMatch = (targetAppt) => {
+      if (extracted.date_preference && String(extracted.date_preference).toLowerCase() !== 'null' && checks.dayInfo) {
+        const d = checks.dayInfo;
+        if (!d.isWorking || d.isBlocked || d.shiftEnded || d.isFull) {
+          return { action: 'RESCHEDULE_DAY_UNAVAILABLE', dayInfo: d, targetAppt };
+        }
+        return { action: 'ASK_RESCHEDULE_CONFIRM', targetAppt, dayInfo: d };
+      }
+      return { action: 'ASK_RESCHEDULE_DATE', targetAppt };
+    };
+
     const rawNum = parseInt((extracted.patient_name || extracted.userMessage || '').trim(), 10);
     if (!isNaN(rawNum) && rawNum >= 1 && rawNum <= appts.length) {
-      return { action: 'ASK_RESCHEDULE_DATE', targetAppt: appts[rawNum - 1] };
+      return handleMatch(appts[rawNum - 1]);
     }
     if (extracted.patient_name || intent === 'reschedule') {
       const targetName = (extracted.patient_name || '').trim().toLowerCase();
       const matched = appts.find(a => (a.patient_name || '').trim().toLowerCase() === targetName);
       if (matched) {
-        return { action: 'ASK_RESCHEDULE_DATE', targetAppt: matched };
+        return handleMatch(matched);
       }
     }
     return { action: 'ASK_RESCHEDULE_SELECT', appts };

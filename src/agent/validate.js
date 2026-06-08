@@ -107,8 +107,8 @@ async function validateExtracted(extracted, clinic, patient, stateData, userMess
 
   // 3. Check day availability
   if (extracted.date_preference && String(extracted.date_preference).toLowerCase() !== 'null') {
-    const isBooking = extracted.intent === 'booking';
-    if (isBooking || parsedTopics.includes('absence') || parsedTopics.includes('hours')) {
+    const isBookingOrReschedule = ['booking', 'reschedule'].includes(extracted.intent) || stateData.booking_substate === 'awaiting_reschedule_date';
+    if (isBookingOrReschedule || parsedTopics.includes('absence') || parsedTopics.includes('hours')) {
       result.dayInfo = await checkDayInfo(extracted.date_preference, clinic);
     }
   }
