@@ -27,24 +27,25 @@ const pending = new Map();
  * @param {string}   messageText  — the individual message fragment
  * @param {Function} onReady      — called with the combined text when the burst settles
  */
-function debounceMessage(clinicId, phoneNumber, messageText, onReady) {
+function debounceMessage(clinicId, phoneNumber, messageText, messageType, onReady) {
   const key     = `${clinicId}:${phoneNumber}`;
   const existing = pending.get(key);
 
   if (existing) {
     // Another message arrived before the timer fired — reset it
     clearTimeout(existing.timer);
-    existing.parts.push(messageText);
+    existing.parts.push({ text: messageText, type: messageType });
   } else {
-    pending.set(key, { timer: null, parts: [messageText] });
+    pending.set(key, { timer: null, parts: [{ text: messageText, type: messageType }] });
   }
 
   const entry = pending.get(key);
 
   entry.timer = setTimeout(() => {
-    const combined = entry.parts.join(' ');
+    const combinedText = entry.parts.map(p => p.text).join(' ');
+    const combinedType = entry.parts.some(p => p.type === 'voice') ? 'voice' : 'text';
     pending.delete(key);          // clean up so stale entries don't accumulate
-    onReady(combined);
+    onReady({ combinedText, combinedType });
   }, DEBOUNCE_DELAY_MS);
 }
 

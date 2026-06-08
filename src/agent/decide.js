@@ -20,12 +20,16 @@ function decide(extracted, checks, currentState, stateData) {
       return { action: 'DO_CANCEL', data: stateData };
     if (currentState === 'awaiting_cancel_all_confirm')
       return { action: 'DO_CANCEL_ALL', data: stateData };
+    if (currentState === 'awaiting_voice_confirm')
+      return { action: 'DO_VOICE_BOOK', data: stateData };
     return { action: 'UNCLEAR' };
   }
 
   if (intent === 'rejection') {
     if (['awaiting_rebook_confirm','awaiting_cancel_confirm','awaiting_cancel_all_confirm'].includes(currentState))
       return { action: 'CANCEL_FLOW' };
+    if (currentState === 'awaiting_voice_confirm')
+      return { action: 'REJECT_VOICE_BOOK' };
     return { action: 'UNCLEAR' };
   }
 
@@ -141,6 +145,10 @@ function decide(extracted, checks, currentState, stateData) {
 
       if (d.substitute)
         return { action: 'BOOK_WITH_SUBSTITUTE', dayInfo: d, extracted };
+    }
+
+    if (extracted.messageType === 'voice') {
+      return { action: 'ASK_VOICE_CONFIRM', extracted, dayInfo: checks.dayInfo };
     }
 
     return { action: 'BOOK', extracted, dayInfo: checks.dayInfo };

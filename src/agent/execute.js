@@ -254,6 +254,37 @@ async function execute(decision, clinic, patient, patientPhone) {
       await upsertConversationState(clinic.id, patientPhone, 'active', {});
       return 'تمام، موعدك محجوز كما هو 👍';
 
+    case 'ASK_VOICE_CONFIRM': {
+      await upsertConversationState(clinic.id, patientPhone, 'active', {
+        booking_substate: 'awaiting_voice_confirm',
+        pending_booking: {
+          extracted: decision.extracted,
+          dayInfo: decision.dayInfo
+        }
+      });
+      return `سمعتك تطلب حجز باسم "${decision.extracted.patient_name}" ليوم ${decision.dayInfo.displayDate}. هل المعلومات صحيحة؟ (نعم / لا)`;
+    }
+
+    case 'DO_VOICE_BOOK': {
+      const { pending_booking } = decision.data || {};
+      if (!pending_booking || !pending_booking.extracted) {
+        await upsertConversationState(clinic.id, patientPhone, 'active', {});
+        return 'عذراً، انتهت صلاحية الطلب. ممكن تطلب الحجز مرة ثانية؟';
+      }
+      const fakeDecision = {
+        extracted: pending_booking.extracted,
+        dayInfo: pending_booking.dayInfo
+      };
+      const result = await doBooking(fakeDecision, clinic, patient, patientPhone);
+      await upsertConversationState(clinic.id, patientPhone, 'active', { booking_substate: 'idle' });
+      return result;
+    }
+
+    case 'REJECT_VOICE_BOOK': {
+      await upsertConversationState(clinic.id, patientPhone, 'active', {});
+      return 'تمام، تم إلغاء الطلب. تكدر ترسل طلب الحجز من جديد برسالة صوتية أوضح، أو تكتب الاسم واليوم المطلوب كنص عشان يكون أدق 😊';
+    }
+
     case 'DAY_NOT_WORKING': {
       const { dayInfo } = decision;
       return `${dayInfo.displayDate} مو يوم دوام في العيادة. تكدر تحجز يوم ثاني؟`;

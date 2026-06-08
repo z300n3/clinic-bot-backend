@@ -5,7 +5,7 @@ const { execute }           = require('./execute');
 const { saveMessage, loadConversationHistory, supabase, upsertConversationState } = require('../services/supabase');
 const logger = require('../utils/logger');
 
-async function handleIncomingMessage({ clinic, patient, patientPhone, userMessage }) {
+async function handleIncomingMessage({ clinic, patient, patientPhone, userMessage, messageType }) {
 
   // 1. Load state
   const { data: stateRow, error: stateErr } = await supabase
@@ -37,6 +37,7 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
   // 3. Run Extract FIRST (works for all states now)
   const extracted = await extractIntent(userMessage, subState, stateData);
   extracted.userMessage = userMessage; // pass raw message for gate answers
+  extracted.messageType = messageType; // pass messageType to decide
   logger.info('[Pipeline] Extracted', { 
     intent: extracted.intent,
     msgPreview: userMessage.slice(0, 30),
@@ -94,7 +95,7 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
 
   // 6. SUBSTATE ESCAPE — stale confirmation substate blocked by new intent
   const confirmSubstates = ['awaiting_cancel_confirm','awaiting_cancel_all_confirm',
-                            'awaiting_rebook_confirm','awaiting_cancel_select'];
+                            'awaiting_rebook_confirm','awaiting_cancel_select', 'awaiting_voice_confirm'];
   const bookingSubstates = ['awaiting_info', 'awaiting_date'];
   const escapeIntents = ['booking','escalate_to_doctor','cancellation','cancel_all','inquiry','check_appointment'];
 

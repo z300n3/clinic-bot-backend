@@ -198,12 +198,13 @@ async function processMessage({ phoneNumberId, from, profileName, messageId, tex
   // 4. Hand off to the debouncer.
   //    If the user sends more messages within DEBOUNCE_DELAY_MS, the timer
   //    resets and all fragments are joined before the agent is called.
-  debounceMessage(clinic.id, from, text, (combinedText) => {
+  debounceMessage(clinic.id, from, text, messageType, ({ combinedText, combinedType }) => {
     logger.info('Debounce settled', {
       from,
+      combinedType,
       combined: combinedText.slice(0, 120),
     });
-    processDebounced({ clinic, patient, phoneNumberId, from, combinedText }).catch((err) =>
+    processDebounced({ clinic, patient, phoneNumberId, from, combinedText, combinedType }).catch((err) =>
       logger.error('processDebounced error', { from, error: err.message })
     );
   });
@@ -211,7 +212,7 @@ async function processMessage({ phoneNumberId, from, profileName, messageId, tex
 
 // ── Phase 2: debounced (runs once per burst, with the combined text) ───────────
 
-async function processDebounced({ clinic, patient, phoneNumberId, from, combinedText }) {
+async function processDebounced({ clinic, patient, phoneNumberId, from, combinedText, combinedType }) {
   // 1. Show typing indicator so the patient knows the bot is working
   sendTypingIndicator(phoneNumberId, from).catch(() => {});
 
@@ -223,6 +224,7 @@ async function processDebounced({ clinic, patient, phoneNumberId, from, combined
       patient,
       patientPhone: from,
       userMessage:  combinedText,
+      messageType:  combinedType,
     });
   } catch (err) {
     logger.error('Agent error', { from, error: err.message });
