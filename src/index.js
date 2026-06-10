@@ -30,10 +30,12 @@ const app = express();
 
 // ── CORS — allow the Next.js dashboard to call /api/────────────────────────
 const DASHBOARD_ORIGIN = process.env.DASHBOARD_URL || 'http://localhost:3001';
+const ALLOWED_ORIGINS = [DASHBOARD_ORIGIN, 'https://clinic-bot-fr89.vercel.app', 'http://localhost:3000'];
+
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (origin === DASHBOARD_ORIGIN) {
-    res.setHeader('Access-Control-Allow-Origin',  DASHBOARD_ORIGIN);
+  if (ALLOWED_ORIGINS.includes(origin) || (origin && origin.endsWith('vercel.app'))) {
+    res.setHeader('Access-Control-Allow-Origin',  origin);
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
