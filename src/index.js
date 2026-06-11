@@ -57,11 +57,14 @@ app.use(
   })
 );
 
+const logsRouter         = require('./routes/logs');
+
 // Routes
 app.use('/webhook',          whatsappRouter);
 app.use('/api/appointments', appointmentsRouter);
 app.use('/api/messages',     messagesRouter);
 app.use('/api/clinics',      clinicsRouter);
+app.use('/api/logs',         logsRouter);
 app.use('/admin',            adminRouter);
 
 app.get('/health', (_req, res) => {
