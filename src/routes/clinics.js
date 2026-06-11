@@ -34,10 +34,12 @@ router.get('/:slug', async (req, res) => {
     }
 
     // 3. Fetch Blocked Periods
+    const todayStr = new Date().toISOString().split('T')[0];
     const { data: blocked, error: blockedErr } = await supabase
       .from('blocked_periods')
       .select('*')
-      .eq('clinic_id', clinic.id);
+      .eq('clinic_id', clinic.id)
+      .gte('end_date', todayStr);
     
     if (blockedErr) {
       logger.error('Error fetching blocked periods', { error: blockedErr });

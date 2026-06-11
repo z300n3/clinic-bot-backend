@@ -172,7 +172,7 @@ router.post('/web', async (req, res) => {
             return `${String(h).padStart(2, '0')}:${minutes} ${ampm}`;
           };
           const shift = sched.shifts[0];
-          timeStr = `${formatTime12Hour(shift.open)} - ${formatTime12Hour(shift.close)}`;
+          timeStr = `من ${formatTime12Hour(shift.open)} إلى ${formatTime12Hour(shift.close)}`;
         }
         
         const message = `مرحباً ${patient_name} 👋\n\nتم تأكيد حجز موعدك بنجاح في ${clinic.name}.\n\n📅 التاريخ: ${dateStr} (${dayName})\n⏰ أوقات الدوام: ${timeStr}\n🔢 الدور المتوقع: ${queueNumber}\n\nنتمنى لك السلامة والشفاء العاجل!`;
