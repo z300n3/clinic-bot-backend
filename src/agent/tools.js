@@ -1,114 +1,195 @@
-const OpenAI = require('openai');
-const { getBaghdadNow, formatTime12, TIMEZONE, dayjs } = require('../utils/time');
+'use strict';
+
+/**
+ * tools.js — Hybrid Agentic Architecture
+ *
+ * Self-validating tool implementations for the LLM agent.
+ * Each tool validates its own inputs and returns clear Arabic error messages
+ * that the LLM can interpret and act on.
+ *
+ * Tools (7 total):
+ *   1. check_availability      — returns available days for booking
+ *   2. book_appointment        — books a new appointment
+ *   3. get_my_appointments     — returns patient's upcoming appointments (with IDs)
+ *   4. cancel_appointment      — cancels a specific appointment by ID
+ *   5. reschedule_appointment  — cancels old + books new (atomic-ish)
+ *   6. escalate_to_doctor      — routes patient to human doctor review
+ *
+ * Helper functions (reused from old tools.js):
+ *   - getDayConfig, getBlockForDay, parseArabicDatePreference
+ *   - formatArabicDay, getDynamicScheduleSummary, getAbsenceSummary
+ */
 
 const { supabase, upsertConversationState } = require('../services/supabase');
+const { getBaghdadNow, formatTime12, TIMEZONE } = require('../utils/time');
 const logger = require('../utils/logger');
+const dayjs = require('dayjs');
+const utc = require('dayjs/plugin/utc');
+const timezone = require('dayjs/plugin/timezone');
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
-const BOOKING_HOUR = 12; // appointments are day-based; we store a fixed marker time (noon Baghdad)
+const BOOKING_HOUR = 12; // appointments stored at noon Baghdad as a day marker
 
-// ── Tool Schemas for Claude ───────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// TOOL DEFINITIONS (OpenAI-compatible format — works with DeepSeek SDK)
+// ═══════════════════════════════════════════════════════════════════════════════
 
 const toolDefinitions = [
   {
-    name: 'check_availability',
-    description: 'يعرض المواعيد المتاحة',
-    input_schema: {
-      type: 'object',
-      properties: {
-        date_preference: { type: 'string', description: 'اليوم أو التاريخ المطلوب' },
+    type: 'function',
+    function: {
+      name: 'check_availability',
+      description:
+        'يعرض الأيام المتاحة للحجز خلال الأسبوعين القادمين. ' +
+        'استدعها عندما المريض يسأل عن أي يوم فيه مجال، أو قبل الحجز لتأكيد التوفر.',
+      parameters: {
+        type: 'object',
+        properties: {
+          date_preference: {
+            type: 'string',
+            description:
+              'تفضيل المريض الزمني كما قاله: باجر، الخميس، اقرب موعد، 2026-06-15، الخ.',
+          },
+        },
+        required: ['date_preference'],
       },
-      required: ['date_preference'],
     },
   },
   {
-    name: 'book_appointment',
-    description: 'يحجز موعد للمريض',
-    input_schema: {
-      type: 'object',
-      properties: {
-        patient_name: { type: 'string', description: 'الاسم الكامل للمريض' },
-        appointment_date: { type: 'string', description: 'تاريخ الحجز YYYY-MM-DD' },
-        reason: { type: 'string', description: 'سبب الزيارة' },
+    type: 'function',
+    function: {
+      name: 'book_appointment',
+      description:
+        'يحجز موعد للمريض. ' +
+        'لا تستدعيها إلا بعد: 1) الحصول على الاسم الثنائي الكامل، 2) تحديد التاريخ. ' +
+        'إذا الرسالة صوتية، أكد المعلومات مع المريض أولاً.',
+      parameters: {
+        type: 'object',
+        properties: {
+          patient_name: {
+            type: 'string',
+            description: 'الاسم الكامل للمريض (ثنائي على الأقل: الاسم واسم الأب)',
+          },
+          appointment_date: {
+            type: 'string',
+            description: 'تاريخ الحجز بصيغة YYYY-MM-DD',
+          },
+        },
+        required: ['patient_name', 'appointment_date'],
       },
-      required: ['patient_name', 'appointment_date', 'reason'],
     },
   },
   {
-    name: 'get_day_bookings',
-    description: 'يرجع عدد الحجوزات في يوم معين',
-    input_schema: {
-      type: 'object',
-      properties: {
-        date_preference: { type: 'string', description: 'تاريخ اليوم المطلوب' },
+    type: 'function',
+    function: {
+      name: 'get_my_appointments',
+      description:
+        'تعرض جميع مواعيد المريض القادمة مع IDs كل موعد. ' +
+        'استدعها قبل الإلغاء أو التأجيل إذا المريض عنده أكثر من موعد. ' +
+        'لا تسأل المريض عن اسمه أو رقمه — النظام يعرفه تلقائياً.',
+      parameters: {
+        type: 'object',
+        properties: {},
+        required: [],
       },
-      required: ['date_preference'],
     },
   },
   {
-    name: 'cancel_appointment',
-    description: 'يلغي الموعد القادم للمريض. ملاحظة هامة: النظام يتعرف على المريض تلقائياً من رقم هاتفه، لذلك لا تسأل المريض عن اسمه أو رقمه أبداً! فقط تأكد من رغبته بالإلغاء ثم استدعِ الأداة.',
-    input_schema: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    name: 'check_my_appointment',
-    description: 'يبحث عن موعد المريض القادم ويعرض تفاصيله. ملاحظة هامة: النظام يتعرف على المريض تلقائياً من رقم الواتساب، لا تسأله عن اسمه أو رقمه أبداً! استدعِ الأداة مباشرة بمجرد سؤاله عن موعده.',
-    input_schema: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    name: 'escalate_to_human',
-    description: 'يحول للموظف البشري',
-    input_schema: {
-      type: 'object',
-      properties: {
-        reason: { type: 'string', description: 'سبب التصعيد' },
+    type: 'function',
+    function: {
+      name: 'cancel_appointment',
+      description:
+        'تلغي موعد محدد. يجب تحديد appointment_id (تحصله من get_my_appointments). ' +
+        'لا تستدعيها بدون تأكيد صريح من المريض.',
+      parameters: {
+        type: 'object',
+        properties: {
+          appointment_id: {
+            type: 'string',
+            description: 'معرف الموعد UUID — تحصله من get_my_appointments',
+          },
+        },
+        required: ['appointment_id'],
       },
-      required: ['reason'],
     },
   },
   {
-    name: 'out_of_scope_response',
-    description: 'استخدم هذه الأداة للرد بشكل ثابت عندما يسأل المريض عن موضوع خارج نطاق العيادة أو الحجوزات تماماً.',
-    input_schema: {
-      type: 'object',
-      properties: {},
-      required: [],
+    type: 'function',
+    function: {
+      name: 'reschedule_appointment',
+      description:
+        'تأجيل موعد قائم إلى يوم آخر. ' +
+        'تلغي الموعد القديم وتحجز موعد جديد بنفس الاسم تلقائياً. ' +
+        'يجب تأكيد اليوم الجديد مع المريض قبل الاستدعاء.',
+      parameters: {
+        type: 'object',
+        properties: {
+          appointment_id: {
+            type: 'string',
+            description: 'معرف الموعد المراد تأجيله',
+          },
+          new_date: {
+            type: 'string',
+            description: 'التاريخ الجديد بصيغة YYYY-MM-DD',
+          },
+        },
+        required: ['appointment_id', 'new_date'],
+      },
     },
   },
   {
-    name: 'greeting_response',
-    description: 'استخدم هذه الأداة للرد بشكل ثابت عندما تكون رسالة المريض عبارة عن ترحيب فقط (مثل: السلام عليكم، هلو، مرحبا) ولا تحتوي على طلب واضح.',
-    input_schema: {
-      type: 'object',
-      properties: {},
-      required: [],
+    type: 'function',
+    function: {
+      name: 'escalate_to_doctor',
+      description:
+        'تحول طلب المريض للطبيب للمراجعة. ' +
+        'استدعها عندما المريض يوصف مشكلة طبية أو أعراض أو يطلب متابعة علاج. ' +
+        'لازم تجمع وصف المشكلة والأعراض من المريض أولاً قبل الاستدعاء.',
+      parameters: {
+        type: 'object',
+        properties: {
+          complaint: {
+            type: 'string',
+            description: 'وصف مشكلة المريض أو سبب التصعيد',
+          },
+          symptoms: {
+            type: 'string',
+            description: 'الأعراض الحالية إن وُجدت (اختياري)',
+          },
+          is_followup: {
+            type: 'boolean',
+            description: 'هل هذه متابعة لزيارة سابقة للعيادة',
+          },
+        },
+        required: ['complaint', 'is_followup'],
+      },
     },
   },
 ];
 
-// ── Router ────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// TOOL ROUTER
+// ═══════════════════════════════════════════════════════════════════════════════
 
 async function executeTool(name, input, context) {
+  logger.info('[Tool] Executing', { tool: name, input });
   switch (name) {
-    case 'check_availability':  return checkAvailability(input, context);
-    case 'book_appointment':    return bookAppointment(input, context);
-    case 'get_day_bookings':    return getDayBookings(input, context);
-    case 'cancel_appointment':  return cancelAppointment(input, context);
-    case 'check_my_appointment': return checkMyAppointment(input, context);
-    case 'escalate_to_human':   return escalateToHuman(input, context);
+    case 'check_availability':      return checkAvailability(input, context);
+    case 'book_appointment':        return bookAppointment(input, context);
+    case 'get_my_appointments':     return getMyAppointments(input, context);
+    case 'cancel_appointment':      return cancelAppointment(input, context);
+    case 'reschedule_appointment':  return rescheduleAppointment(input, context);
+    case 'escalate_to_doctor':      return escalateToDoctor(input, context);
     default:
       return { error: `أداة غير معروفة: ${name}` };
   }
 }
 
-// ── check_availability (day-based) ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// TOOL 1: check_availability
+// Ported from old tools.js checkAvailability() lines 113-220
+// ═══════════════════════════════════════════════════════════════════════════════
 
 async function checkAvailability({ date_preference }, { clinic }) {
   try {
@@ -139,13 +220,13 @@ async function checkAvailability({ date_preference }, { clinic }) {
     ]);
 
     if (bookedRes.error)    return { error: 'فشل في تحميل المواعيد المحجوزة' };
-    if (schedulesRes.error) logger.warn('availability_schedules load warning', { error: schedulesRes.error.message });
-    if (blocksRes.error)    logger.warn('blocked_periods load warning',        { error: blocksRes.error.message });
+    if (schedulesRes.error) logger.warn('check_availability: schedules load warning', { e: schedulesRes.error.message });
+    if (blocksRes.error)    logger.warn('check_availability: blocks load warning', { e: blocksRes.error.message });
 
     const schedules = schedulesRes.data || [];
     const blocks    = blocksRes.data    || [];
 
-    // Count booked appointments per calendar day (Baghdad)
+    // Count booked per day
     const bookedByDay = {};
     for (const row of (bookedRes.data || [])) {
       const k = dayjs(row.scheduled_at).tz(TIMEZONE).format('YYYY-MM-DD');
@@ -161,164 +242,135 @@ async function checkAvailability({ date_preference }, { clinic }) {
 
       if (dateStr >= todayStr) {
         const { isWorking, capacity, shifts } = getDayConfig(day, schedules, clinic.working_hours || {});
-
-        const block = getBlockForDay(day, blocks);
-        const isBlockedNoSub = block && !block.substitute_doctor_name;
+        const block             = getBlockForDay(day, blocks);
+        const isBlockedNoSub    = block && !block.substitute_doctor_name;
 
         if (isWorking && !isBlockedNoSub) {
           const booked    = bookedByDay[dateStr] || 0;
           const unlimited = capacity === null || capacity === undefined;
           const isFull    = !unlimited && booked >= capacity;
+          const shift     = shifts[0];
 
-          const shift = shifts[0];
-
-          // For TODAY: skip if working hours have already ended
+          // For today: skip if shift already ended
           const todayShiftEnded = dateStr === todayStr && (() => {
             if (!shift?.close) return false;
             const [ch, cm] = shift.close.split(':').map(Number);
-            const shiftClose = day.hour(ch).minute(cm).second(0).millisecond(0);
-            return !now.isBefore(shiftClose);
+            return !now.isBefore(day.hour(ch).minute(cm).second(0).millisecond(0));
           })();
 
           if (!isFull && !todayShiftEnded) {
-            const workingHours = shift
-              ? `${formatTime12(shift.open)}${shift.close ? ' — ' + formatTime12(shift.close) : ''}`
-              : null;
-
             days.push({
               date:          dateStr,
-              display:       formatArabicDay(day) + (block?.substitute_doctor_name ? ` (مع الطبيب البديل: ${block.substitute_doctor_name})` : ''),
+              display:       formatArabicDay(day) + (block?.substitute_doctor_name ? ` (الطبيب البديل: ${block.substitute_doctor_name})` : ''),
               booked,
               capacity:      unlimited ? null : capacity,
               remaining:     unlimited ? null : capacity - booked,
-              working_hours: workingHours,
+              working_hours: shift ? `${formatTime12(shift.open)}${shift.close ? ' — ' + formatTime12(shift.close) : ''}` : null,
             });
           }
         }
       }
-
       day = day.add(1, 'day');
     }
 
     if (days.length === 0) {
-      return {
-        available: false,
-        message:   'ما في أيام متاحة للحجز بالفترة المطلوبة. جرب تاريخاً آخر.',
-        days:      [],
-      };
+      return { available: false, message: 'ما في أيام متاحة للحجز بالفترة المطلوبة. جرب تاريخاً آخر.', days: [] };
     }
+    return { available: true, days, message: 'هذي الأيام المتاحة للحجز:' };
 
-    return {
-      available: true,
-      days,
-      message:   'هذي الأيام المتاحة للحجز:',
-    };
   } catch (err) {
-    logger.error('checkAvailability error', { error: err.message });
+    logger.error('[Tool] checkAvailability error', { error: err.message });
     return { error: 'خطأ في فحص الأيام المتاحة: ' + err.message };
   }
 }
 
-// ── book_appointment (day-based, auto queue number) ────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// TOOL 2: book_appointment
+// Merged from old tools.js bookAppointment() + execute.js doBooking()
+// ═══════════════════════════════════════════════════════════════════════════════
 
-async function bookAppointment({ patient_name, appointment_date, reason }, { clinic, patient }) {
+async function bookAppointment({ patient_name, appointment_date }, { clinic, patient }) {
   try {
+    // Inner validation (defense-in-depth on top of guardrails.js)
     const nameParts = (patient_name || '').trim().split(/\s+/).filter(Boolean);
     if (nameParts.length < 2) {
-      return { 
-        success: false, 
-        error: 'الاسم يجب أن يكون ثنائي على الأقل (اسم + اسم الأب أو العائلة).' 
-      };
+      return { success: false, error: 'الاسم يجب أن يكون ثنائي على الأقل (الاسم واسم الأب).' };
     }
 
     const now       = getBaghdadNow();
-    const targetDay = parseArabicDatePreference(appointment_date, now).startOf('day');
+    const targetDay = dayjs.tz(appointment_date, 'YYYY-MM-DD', TIMEZONE).startOf('day');
 
     if (!targetDay.isValid()) {
-      return { success: false, error: 'التاريخ غير صحيح' };
+      return { success: false, error: 'التاريخ غير صحيح. استخدم صيغة YYYY-MM-DD.' };
     }
     if (targetDay.format('YYYY-MM-DD') < now.format('YYYY-MM-DD')) {
-      return { success: false, error: 'لا يمكن الحجز في يوم مضى' };
+      return { success: false, error: 'لا يمكن الحجز في تاريخ ماضٍ.' };
     }
 
     const dayStartISO = targetDay.toISOString();
     const dayEndISO   = targetDay.endOf('day').toISOString();
 
+    // Check active bookings limit (max 3)
+    const { count: activeCount } = await supabase
+      .from('appointments')
+      .select('*', { count: 'exact', head: true })
+      .eq('clinic_id', clinic.id)
+      .eq('patient_id', patient.id)
+      .in('status', ['scheduled', 'confirmed'])
+      .gte('scheduled_at', now.toISOString());
+
+    if ((activeCount || 0) >= 3) {
+      return { success: false, error: 'لديك 3 مواعيد نشطة وهذا الحد الأقصى. يجب إلغاء أحدها أولاً.' };
+    }
+
     const [schedulesRes, blocksRes, bookedRes] = await Promise.all([
-      supabase
-        .from('availability_schedules')
-        .select('day_of_week, specific_date, is_working_day, daily_capacity, shifts')
-        .eq('clinic_id', clinic.id),
-
-      supabase
-        .from('blocked_periods')
-        .select('start_at, end_at, is_full_day, substitute_doctor_name, substitute_doctor_note')
-        .eq('clinic_id', clinic.id)
-        .lt('start_at', dayEndISO)
-        .gt('end_at',   dayStartISO),
-
-      supabase
-        .from('appointments')
-        .select('id, patient_id')
-        .eq('clinic_id', clinic.id)
-        .in('status', ['scheduled', 'confirmed'])
-        .gte('scheduled_at', dayStartISO)
-        .lte('scheduled_at', dayEndISO),
+      supabase.from('availability_schedules').select('day_of_week, specific_date, is_working_day, daily_capacity, shifts').eq('clinic_id', clinic.id),
+      supabase.from('blocked_periods').select('start_at, end_at, is_full_day, substitute_doctor_name, substitute_doctor_note').eq('clinic_id', clinic.id).lt('start_at', dayEndISO).gt('end_at', dayStartISO),
+      supabase.from('appointments').select('id, patient_id, patient_name').eq('clinic_id', clinic.id).in('status', ['scheduled', 'confirmed']).gte('scheduled_at', dayStartISO).lte('scheduled_at', dayEndISO),
     ]);
 
-    const schedules = schedulesRes.data || [];
-    const blocks    = blocksRes.data    || [];
-    const bookedAppts = bookedRes.data || [];
-    const booked    = bookedAppts.length;
+    const schedules   = schedulesRes.data || [];
+    const blocks      = blocksRes.data    || [];
+    const bookedAppts = bookedRes.data    || [];
+    const booked      = bookedAppts.length;
 
-    // Fix 5: Prevent duplicate bookings for the EXACT same name from the same phone
-    const sameDayAppt = bookedAppts.find(a => String(a.patient_id) === String(patient.id) && a.patient_name === patient_name);
-    if (sameDayAppt) {
-      return { success: false, error: `يوجد موعد محجوز مسبقاً باسم "${patient_name}" في هذا اليوم. لا يمكن حجز موعدين بنفس الاسم في نفس اليوم.` };
+    // Duplicate booking check (same name same day)
+    const duplicate = bookedAppts.find(
+      a => String(a.patient_id) === String(patient.id) && a.patient_name === patient_name
+    );
+    if (duplicate) {
+      return { success: false, error: `يوجد موعد محجوز مسبقاً باسم "${patient_name}" في هذا اليوم.` };
     }
 
     const { isWorking, capacity, shifts } = getDayConfig(targetDay, schedules, clinic.working_hours || {});
-
     if (!isWorking) {
       return { success: false, error: `${formatArabicDay(targetDay)} ليس يوم دوام في العيادة.` };
     }
-    let servedBy = null; // null = main doctor
-    let substituteNotice = '';
 
     const block = getBlockForDay(targetDay, blocks);
+    let servedBy = null;
+    let substituteNotice = '';
 
     if (block) {
       if (block.substitute_doctor_name) {
-        // Substitute available — allow booking, same hours
         servedBy = block.substitute_doctor_name;
         substituteNotice = `⚠️ ملاحظة: ${clinic.doctor_name || 'الدكتور الأساسي'} غائب هذا اليوم. الطبيب البديل: ${block.substitute_doctor_name}`;
       } else {
-        // No substitute — block as before
-        return { 
-          success: false, 
-          error: `${formatArabicDay(targetDay)} الدكتور غير متوفر (إجازة/غياب) ولا يوجد بديل.` 
-        };
+        return { success: false, error: `${formatArabicDay(targetDay)} الدكتور غير متوفر ولا يوجد بديل.` };
       }
     }
 
     const unlimited = capacity === null || capacity === undefined;
     if (!unlimited && booked >= capacity) {
-      return {
-        success: false,
-        error:   `عذراً، اكتمل العدد ليوم ${formatArabicDay(targetDay)} (${capacity} موعد). جرب يوماً آخر.`,
-      };
+      return { success: false, error: `اكتمل العدد ليوم ${formatArabicDay(targetDay)} (${capacity} موعد). جرب يوماً آخر.` };
     }
 
-    // If booking for TODAY, reject if the shift has already ended
+    // Check if today's shift has ended
     const shift0 = shifts[0];
     if (targetDay.format('YYYY-MM-DD') === now.format('YYYY-MM-DD') && shift0?.close) {
       const [ch, cm] = shift0.close.split(':').map(Number);
-      const shiftClose = targetDay.hour(ch).minute(cm).second(0).millisecond(0);
-      if (!now.isBefore(shiftClose)) {
-        return {
-          success: false,
-          error: `انتهى دوام الدكتور اليوم (${formatTime12(shift0.close)}). جرب تحجز ليوم ثاني.`,
-        };
+      if (!now.isBefore(targetDay.hour(ch).minute(cm).second(0).millisecond(0))) {
+        return { success: false, error: `انتهى دوام الدكتور اليوم (${formatTime12(shift0.close)}). جرب تحجز ليوم ثانٍ.` };
       }
     }
 
@@ -326,140 +378,270 @@ async function bookAppointment({ patient_name, appointment_date, reason }, { cli
     const scheduledAt = targetDay.hour(BOOKING_HOUR).minute(0).second(0).millisecond(0);
     const duration    = clinic.appointment_duration_minutes || 30;
 
-    // ── Compute estimated arrival time ────────────────────────────────────────
+    // Compute estimated arrival
+    let estimatedLine = '';
+    let workHoursLine = '';
     const shift = shifts[0];
-    let estimatedLine  = '';
-    let workHoursLine  = '';
-
     if (shift?.open) {
       const [sh, sm] = shift.open.split(':').map(Number);
-      const estimated  = targetDay.hour(sh).minute(sm || 0).second(0)
-                          .add((queueNumber - 1) * duration, 'minute');
-      estimatedLine = `⏰ وقتك التقريبي للمراجعة: ${formatTime12(estimated.format('HH:mm'))}`;
-
-      const openFmt  = formatTime12(shift.open);
-      const closeFmt = shift.close ? ` — ${formatTime12(shift.close)}` : '';
-      workHoursLine  = `🕐 دوام العيادة: ${openFmt}${closeFmt}`;
+      const estimated = targetDay.hour(sh).minute(sm || 0).add((queueNumber - 1) * duration, 'minute');
+      estimatedLine = `⏰ وقتك التقريبي: ${formatTime12(estimated.format('HH:mm'))}`;
+      workHoursLine = `🕐 دوام العيادة: ${formatTime12(shift.open)}${shift.close ? ' — ' + formatTime12(shift.close) : ''}`;
     }
 
-    console.log('[BOOKING ATTEMPT]', {
-      patientName: patient_name,
-      reason: reason,
-      scheduledAt: scheduledAt.toISOString(),
-      patientId: patient.id,
-      clinicId: clinic.id
-    });
-
-    // Direct Booking Insertion (Confirmation Step Removed)
     const { data: appt, error } = await supabase
       .from('appointments')
       .insert({
-        clinic_id: clinic.id,
-        patient_id: patient.id,
-        scheduled_at: scheduledAt.toISOString(),
+        clinic_id:        clinic.id,
+        patient_id:       patient.id,
+        scheduled_at:     scheduledAt.toISOString(),
         duration_minutes: duration,
-        queue_number: queueNumber,
-        status: 'scheduled',
-        reason: reason,
-        patient_name: patient_name || null,
-        served_by: servedBy
+        queue_number:     queueNumber,
+        status:           'scheduled',
+        reason:           null,
+        patient_name:     patient_name,
+        served_by:        servedBy,
       })
       .select('id')
       .single();
 
     if (error) {
-      logger.error('Booking insert error', { error: error.message });
-      return { success: false, error: 'فشل حفظ الموعد في النظام.' };
+      logger.error('[Tool] bookAppointment insert error', { error: error.message });
+      return { success: false, error: 'فشل حفظ الموعد. حاول مرة ثانية.' };
     }
 
     const ref = appt.id.slice(-6).toUpperCase();
 
-    const lines = [
-      `تم تثبيت موعدك بنجاح! ✅`,
-      `📅 ${formatArabicDay(scheduledAt)}`,
-      substituteNotice || null,
-      `🎫 رقمك بالدور: ${queueNumber}`,
-      estimatedLine || null,
-      workHoursLine || null,
-      `👤 ${patient_name || ''}`,
-      `📝 ${reason || ''}`,
-      `رقم الحجز: #${ref}`,
-      `راجع العيادة بهذا اليوم وبيكون دورك حسب رقمك.`
-    ].filter(Boolean).join('\n');
-
     return {
       success: true,
-      message: lines
+      message: [
+        'تم تثبيت موعدك بنجاح! ✅',
+        `📅 ${formatArabicDay(scheduledAt)}`,
+        substituteNotice || null,
+        `🎫 رقمك بالدور: ${queueNumber}`,
+        estimatedLine || null,
+        workHoursLine || null,
+        `👤 ${patient_name}`,
+        `رقم الحجز: #${ref}`,
+        'راجع العيادة بهذا اليوم وبيكون دورك حسب رقمك.',
+      ].filter(Boolean).join('\n'),
     };
+
   } catch (err) {
-    logger.error('bookAppointment error', { error: err.message });
+    logger.error('[Tool] bookAppointment error', { error: err.message });
     return { success: false, error: 'خطأ في الحجز: ' + err.message };
   }
 }
 
-// ── get_day_bookings (how many booked on a given day) ──────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// TOOL 3: get_my_appointments
+// Extended from old checkMyAppointment() — returns ALL upcoming with IDs
+// ═══════════════════════════════════════════════════════════════════════════════
 
-async function getDayBookings({ date_preference }, { clinic }) {
+async function getMyAppointments(_input, { clinic, patient }) {
   try {
     const now = getBaghdadNow();
-    const day = parseArabicDatePreference(date_preference, now).startOf('day');
-
-    const dayStartISO = day.toISOString();
-    const dayEndISO   = day.endOf('day').toISOString();
 
     const { data, error } = await supabase
       .from('appointments')
-      .select('id')
+      .select('id, scheduled_at, queue_number, reason, patient_name')
       .eq('clinic_id', clinic.id)
+      .eq('patient_id', patient.id)
       .in('status', ['scheduled', 'confirmed'])
-      .gte('scheduled_at', dayStartISO)
-      .lte('scheduled_at', dayEndISO);
+      .gte('scheduled_at', now.toISOString())
+      .order('scheduled_at', { ascending: true })
+      .limit(10);
 
-    if (error) return { error: 'فشل في جلب عدد الحجوزات' };
+    if (error) return { error: 'فشل في جلب مواعيدك.' };
+    if (!data || data.length === 0) return { found: false, message: 'ما عندك أي موعد قادم مسجل حالياً.' };
 
-    const count = (data || []).length;
-    return {
-      date:         day.format('YYYY-MM-DD'),
-      display:      formatArabicDay(day),
-      booked_count: count,
-      message:      `عدد الحجوزات ليوم ${formatArabicDay(day)}: ${count} موعد.`,
-    };
+    const appointments = data.map(a => {
+      const d = dayjs(a.scheduled_at).tz(TIMEZONE);
+      return {
+        id:           a.id,
+        date:         d.format('YYYY-MM-DD'),
+        display:      formatArabicDay(d),
+        queue_number: a.queue_number,
+        patient_name: a.patient_name || null,
+      };
+    });
+
+    return { found: true, count: appointments.length, appointments };
+
   } catch (err) {
-    logger.error('getDayBookings error', { error: err.message });
-    return { error: 'خطأ في جلب عدد الحجوزات: ' + err.message };
+    logger.error('[Tool] getMyAppointments error', { error: err.message });
+    return { error: 'خطأ في جلب المواعيد: ' + err.message };
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TOOL 4: cancel_appointment
+// Updated from old cancelAppointment() — requires explicit appointment_id
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function cancelAppointment({ appointment_id }, { clinic }) {
+  try {
+    // Verify appointment belongs to this clinic and is cancellable
+    const { data: appt, error: fetchErr } = await supabase
+      .from('appointments')
+      .select('id, scheduled_at, patient_name, status')
+      .eq('id', appointment_id)
+      .eq('clinic_id', clinic.id)
+      .maybeSingle();
+
+    if (fetchErr || !appt) {
+      return { success: false, error: 'الموعد غير موجود أو لا يخصك.' };
+    }
+    if (!['scheduled', 'confirmed'].includes(appt.status)) {
+      return { success: false, error: 'هذا الموعد لا يمكن إلغاؤه (قد يكون ملغى مسبقاً أو مكتمل).' };
+    }
+
+    const { error: updateErr } = await supabase
+      .from('appointments')
+      .update({ status: 'cancelled', cancelled_at: new Date().toISOString() })
+      .eq('id', appointment_id);
+
+    if (updateErr) {
+      logger.error('[Tool] cancelAppointment update error', { error: updateErr.message });
+      return { success: false, error: 'فشل إلغاء الموعد. حاول مرة ثانية.' };
+    }
+
+    const d = dayjs(appt.scheduled_at).tz(TIMEZONE);
+    return {
+      success: true,
+      message: `تم إلغاء موعد "${appt.patient_name || 'المريض'}" يوم ${formatArabicDay(d)} بنجاح ✅`,
+    };
+
+  } catch (err) {
+    logger.error('[Tool] cancelAppointment error', { error: err.message });
+    return { success: false, error: 'خطأ في الإلغاء: ' + err.message };
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TOOL 5: reschedule_appointment
+// New tool: cancels old + books new (replaces the complex reschedule flow in old execute.js)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function rescheduleAppointment({ appointment_id, new_date }, { clinic, patient }) {
+  try {
+    // Fetch the existing appointment
+    const { data: oldAppt, error: fetchErr } = await supabase
+      .from('appointments')
+      .select('id, scheduled_at, patient_name, status')
+      .eq('id', appointment_id)
+      .eq('clinic_id', clinic.id)
+      .maybeSingle();
+
+    if (fetchErr || !oldAppt) {
+      return { success: false, error: 'الموعد غير موجود أو لا يخصك.' };
+    }
+    if (!['scheduled', 'confirmed'].includes(oldAppt.status)) {
+      return { success: false, error: 'لا يمكن تأجيل هذا الموعد (ملغى أو مكتمل).' };
+    }
+
+    // Cancel old appointment
+    await supabase
+      .from('appointments')
+      .update({ status: 'cancelled', cancelled_at: new Date().toISOString() })
+      .eq('id', appointment_id);
+
+    // Book new appointment with same patient_name
+    const bookResult = await bookAppointment(
+      { patient_name: oldAppt.patient_name, appointment_date: new_date },
+      { clinic, patient }
+    );
+
+    if (!bookResult.success) {
+      // Rollback: restore old appointment
+      await supabase
+        .from('appointments')
+        .update({ status: 'scheduled', cancelled_at: null })
+        .eq('id', appointment_id);
+
+      return {
+        success: false,
+        error: `فشل حجز الموعد الجديد: ${bookResult.error}\nتم استعادة موعدك القديم.`,
+      };
+    }
+
+    const oldD = dayjs(oldAppt.scheduled_at).tz(TIMEZONE);
+    return {
+      success: true,
+      message: `تم تأجيل موعد "${oldAppt.patient_name}" من يوم ${formatArabicDay(oldD)} ✅\n\n${bookResult.message}`,
+    };
+
+  } catch (err) {
+    logger.error('[Tool] rescheduleAppointment error', { error: err.message });
+    return { success: false, error: 'خطأ في التأجيل: ' + err.message };
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TOOL 6: escalate_to_doctor
+// Updated from old escalateToHuman() — richer complaint data, drops gate_collecting state
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function escalateToDoctor({ complaint, symptoms, is_followup }, { clinic, patient, patientPhone }) {
+  try {
+    const summary = [
+      `👤 ${patient.name || patientPhone}`,
+      `📋 متابعة زيارة سابقة: ${is_followup ? 'نعم' : 'لا'}`,
+      `🩺 المشكلة: ${complaint}`,
+      symptoms ? `⚠️ الأعراض: ${symptoms}` : null,
+      `🕐 وقت الطلب: ${getBaghdadNow().format('YYYY-MM-DD HH:mm')} (بغداد)`,
+    ].filter(Boolean).join('\n');
+
+    await upsertConversationState(clinic.id, patientPhone, 'doctor_pending', {
+      escalation: {
+        complaint,
+        symptoms:     symptoms || null,
+        is_followup:  !!is_followup,
+        summary,
+        escalated_at: new Date().toISOString(),
+      },
+    });
+
+    logger.info('[Tool] escalateToDoctor — state set to doctor_pending', { patientPhone });
+
+    return {
+      success: true,
+      message:
+        'تم تحويل طلبك للطبيب 👨‍⚕️\n' +
+        'سيتم الرد هنا بعد المراجعة. الرجاء الانتظار.\n' +
+        'إذا احتجت شي ثاني (حجز، استفسار) تكدر تسأل عادي.',
+    };
+
+  } catch (err) {
+    logger.error('[Tool] escalateToDoctor error', { error: err.message });
+    return { success: false, error: 'خطأ في التصعيد: ' + err.message };
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS
+// Preserved from old tools.js — used by check_availability, book_appointment,
+// validate.js (via systemPrompt.js), and other internal logic
+// ═══════════════════════════════════════════════════════════════════════════════
 
 /**
  * Resolves whether a day is a working day + its daily capacity.
  * Priority: specific_date override > day_of_week rule > clinic.working_hours fallback.
- * capacity: null = unlimited / open.
  */
 function getDayConfig(dayObj, schedules, clinicWorkingHours) {
   const dateStr = dayObj.format('YYYY-MM-DD');
-  const dayNum  = dayObj.day(); // 0=Sunday
+  const dayNum  = dayObj.day();
 
-  // 1. Specific-date override (highest priority)
-  const override = schedules.find((s) => s.specific_date === dateStr);
+  const override = schedules.find(s => s.specific_date === dateStr);
   if (override) {
-    return {
-      isWorking: override.is_working_day,
-      capacity:  override.daily_capacity ?? null,
-      shifts:    override.shifts || [],
-    };
+    return { isWorking: override.is_working_day, capacity: override.daily_capacity ?? null, shifts: override.shifts || [] };
   }
 
-  // 2. Weekly recurring rule
-  const weekly = schedules.find((s) => s.day_of_week === dayNum && s.specific_date === null);
+  const weekly = schedules.find(s => s.day_of_week === dayNum && s.specific_date === null);
   if (weekly) {
-    return {
-      isWorking: weekly.is_working_day,
-      capacity:  weekly.daily_capacity ?? null,
-      shifts:    weekly.shifts || [],
-    };
+    return { isWorking: weekly.is_working_day, capacity: weekly.daily_capacity ?? null, shifts: weekly.shifts || [] };
   }
 
-  // 3. Fallback to legacy clinic.working_hours JSONB (no capacity → unlimited)
   const dayKey  = dayObj.format('dddd').toLowerCase();
   const dayConf = clinicWorkingHours[dayKey];
   if (!dayConf || dayConf.closed) return { isWorking: false, capacity: null, shifts: [] };
@@ -471,427 +653,236 @@ function getDayConfig(dayObj, schedules, clinicWorkingHours) {
 }
 
 /**
- * Returns true if any blocked period overlaps the given calendar day.
+ * Returns the blocked_period record that overlaps the given calendar day, or undefined.
  */
 function getBlockForDay(targetDay, blocks) {
-  // targetDay is a dayjs object in Baghdad timezone
-  const targetDateStr = targetDay.tz(TIMEZONE).format('YYYY-MM-DD');
-  
+  const targetDateStr = dayjs(targetDay).tz(TIMEZONE).format('YYYY-MM-DD');
   return (blocks || []).find(b => {
-    // Convert block start/end to Baghdad dates
-    const blockStartDate = dayjs(b.start_at).tz(TIMEZONE).format('YYYY-MM-DD');
-    const blockEndDate = dayjs(b.end_at).tz(TIMEZONE).format('YYYY-MM-DD');
-    
-    // Compare as date strings (YYYY-MM-DD) — no time component
-    return targetDateStr >= blockStartDate && targetDateStr <= blockEndDate;
+    const start = dayjs(b.start_at).tz(TIMEZONE).format('YYYY-MM-DD');
+    const end   = dayjs(b.end_at).tz(TIMEZONE).format('YYYY-MM-DD');
+    return targetDateStr >= start && targetDateStr <= end;
   });
 }
 
-// ── cancel_appointment ────────────────────────────────────────────────────────
-
-async function cancelAppointment(input, { clinic, patientPhone }) {
-  try {
-    const { data: pat } = await supabase
-      .from('patients')
-      .select('id')
-      .eq('clinic_id', clinic.id)
-      .eq('phone_number', patientPhone)
-      .maybeSingle();
-
-    if (!pat) return { success: false, message: 'ما وجدنا بيانات لهذا الرقم.' };
-
-    const { data: appt } = await supabase
-      .from('appointments')
-      .select('id, scheduled_at, reason')
-      .eq('clinic_id', clinic.id)
-      .eq('patient_id', pat.id)
-      .in('status', ['scheduled', 'confirmed'])
-      .gte('scheduled_at', new Date().toISOString())
-      .order('scheduled_at', { ascending: true })
-      .limit(1)
-      .maybeSingle();
-
-    if (!appt) {
-      return { success: false, message: 'ما عندك مواعيد قادمة محجوزة.' };
-    }
-
-    await supabase.from('appointments').update({ status: 'cancelled', cancelled_at: new Date().toISOString() }).eq('id', appt.id);
-
-    return {
-      success: true,
-      message: `تم إلغاء الموعد بنجاح ✅`
-    };
-  } catch (err) {
-    logger.error('cancelAppointment error', { error: err.message });
-    return { success: false, error: 'خطأ في الإلغاء: ' + err.message };
-  }
-}
-
-// ── check_my_appointment ──────────────────────────────────────────────────────
-
-async function checkMyAppointment(input, { clinic, patientPhone }) {
-  try {
-    const { data: pat } = await supabase
-      .from('patients')
-      .select('id')
-      .eq('clinic_id', clinic.id)
-      .eq('phone_number', patientPhone)
-      .maybeSingle();
-
-    if (!pat) return { success: false, message: 'ما عندك أي موعد مسجل حالياً.' };
-
-    const { data: appt } = await supabase
-      .from('appointments')
-      .select('id, scheduled_at, queue_number, reason')
-      .eq('clinic_id', clinic.id)
-      .eq('patient_id', pat.id)
-      .in('status', ['scheduled', 'confirmed'])
-      .gte('scheduled_at', new Date().toISOString())
-      .order('scheduled_at', { ascending: true })
-      .limit(1)
-      .maybeSingle();
-
-    if (!appt) {
-      return { success: false, message: 'ما عندك أي موعد قادم مسجل.' };
-    }
-
-    const slotDate = dayjs(appt.scheduled_at).tz(TIMEZONE);
-    return {
-      success: true,
-      message: `عندك موعد مسجل يوم ${formatArabicDay(slotDate)} 📅\n🎫 رقمك بالدور هو: ${appt.queue_number}`
-    };
-  } catch (err) {
-    logger.error('checkMyAppointment error', { error: err.message });
-    return { success: false, error: 'خطأ في البحث عن الموعد: ' + err.message };
-  }
-}
-
-async function searchFAQ(clinicId, message) {
-  try {
-    const { data: faqs } = await supabase
-      .from('faqs')
-      .select('question, answer, keywords')
-      .eq('clinic_id', clinicId)
-      .eq('is_active', true);
-
-    if (!faqs || faqs.length === 0) return { found: false, answer: null };
-
-    const msg = message.replace(/[؟?!،,.]/g, '').trim();
-
-    const scored = faqs.map(faq => {
-      let score = 0;
-      const keywords = faq.keywords || [];
-
-      // Direct keyword match
-      for (const kw of keywords) {
-        if (msg.includes(kw)) score += 3;
-      }
-
-      // Word-level partial match
-      const words = msg.split(' ').filter(w => w.length > 2);
-      for (const word of words) {
-        for (const kw of keywords) {
-          if (kw.includes(word) || word.includes(kw)) score += 1;
-        }
-      }
-
-      // Common pattern matching
-      const patterns = {
-        location:  ['وين','فين','موقع','عنوان','مكان','كيف اوصل','خارطة'],
-        hours:     ['دوام','ساعات','تفتح','تسكر','متى','يمته','وقت'],
-        price:     ['سعر','كلفة','كم','فلوس','دينار','اجور','اسعار'],
-        specialty: ['تخصص','اختصاص','شنو تعالج','تعالجون','خدمات']
-      };
-
-      for (const [category, categoryWords] of Object.entries(patterns)) {
-        if (categoryWords.some(w => msg.includes(w))) {
-          for (const kw of keywords) {
-            if (kw.includes(category) || 
-                categoryWords.some(w => kw.includes(w))) {
-              score += 2;
-            }
-          }
-        }
-      }
-
-      return { ...faq, score };
-    });
-
-    const best = scored.sort((a, b) => b.score - a.score)[0];
-    if (best && best.score >= 2) {
-      return { found: true, answer: best.answer };
-    }
-    return { found: false, answer: null };
-  } catch (err) {
-    logger.error('searchFAQ error', { error: err.message });
-    return { found: false, error: 'خطأ في البحث: ' + err.message };
-  }
-}
-
-// ── escalate_to_human ─────────────────────────────────────────────────────────
-
-async function escalateToHuman({ reason }, { clinic, patientPhone }) {
-  try {
-    await supabase
-      .from('conversation_state')
-      .upsert(
-        {
-          clinic_id:       clinic.id,
-          patient_phone:   patientPhone,
-          state:           'doctor_pending',
-          state_data:      { reason, escalated_at: new Date().toISOString() },
-          last_message_at: new Date().toISOString(),
-        },
-        { onConflict: 'clinic_id,patient_phone' }
-      );
-
-    return {
-      success: true,
-      message: 'راح يتواصل معاك أحد من فريق العيادة قريباً إن شاء الله. شكراً على صبرك! 🙏',
-      state:   'doctor_pending',
-    };
-  } catch (err) {
-    logger.error('escalateToHuman error', { error: err.message });
-    return { success: false, error: 'خطأ في التصعيد: ' + err.message };
-  }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
+/**
+ * Parses an Arabic/English date preference string into a dayjs object.
+ * Covers: اليوم / باجر / بعد غد / day names / YYYY-MM-DD / "اقرب موعد"
+ */
 function parseArabicDatePreference(pref, now) {
   const lower = (pref || '').toLowerCase().trim();
 
-  // Today
-  if (lower.includes('اليوم') || lower.includes('today')) {
-    return now.clone();
-  }
+  if (lower.includes('اليوم') || lower.includes('today')) return now.clone();
 
-  // Day after tomorrow (check BEFORE tomorrow to avoid partial match)
-  if (lower.includes('بعد غد') || lower.includes('بعد بكره') || lower.includes('بعد باجر') || lower.includes('عگب باجر') || lower.includes('عقب باجر')) {
-    return now.add(2, 'day');
-  }
+  if (lower.includes('بعد غد') || lower.includes('بعد بكره') || lower.includes('بعد باجر') ||
+      lower.includes('عگب باجر') || lower.includes('عقب باجر')) return now.add(2, 'day');
 
-  // Tomorrow
-  if (lower.includes('غد') || lower.includes('بكره') || lower.includes('باجر') || lower.includes('tomorrow')) {
+  if (lower.includes('غد') || lower.includes('بكره') || lower.includes('باجر') ||
+      lower.includes('tomorrow')) return now.add(1, 'day');
+
+  if (lower.includes('الأسبوع القادم') || lower.includes('الاسبوع الجاي') ||
+      lower.includes('الجاي')) return now.add(7, 'day');
+
+  if (lower.includes('اقرب') || lower.includes('أقرب') || lower.includes('asap')) {
+    // ASAP: find next available — caller should check via check_availability
     return now.add(1, 'day');
   }
 
-  // Next week
-  if (lower.includes('الأسبوع القادم') || lower.includes('الاسبوع الجاي') || lower.includes('الجاي')) {
-    return now.add(7, 'day');
-  }
-
-  // Day names
   const dayNames = {
     'الأحد': 0, 'الاحد': 0, 'الاثنين': 1, 'الإثنين': 1, 'الثلاثاء': 2,
     'الأربعاء': 3, 'الاربعاء': 3, 'الخميس': 4, 'الجمعة': 5, 'السبت': 6,
-    sunday: 0, monday: 1, tuesday: 2, wednesday: 3,
-    thursday: 4, friday: 5, saturday: 6,
+    sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6,
   };
-
   for (const [name, num] of Object.entries(dayNames)) {
     if (lower.includes(name)) {
       let target = now.day(num);
-      // If that day already passed this week, move to next week
-      if (target.format('YYYY-MM-DD') <= now.format('YYYY-MM-DD')) {
-        target = target.add(7, 'day');
-      }
+      if (target.format('YYYY-MM-DD') <= now.format('YYYY-MM-DD')) target = target.add(7, 'day');
       return target;
     }
   }
 
-  // Try parsing as explicit date (YYYY-MM-DD)
   const isoMatch = /\d{4}-\d{2}-\d{2}/.exec(pref || '');
   if (isoMatch) {
     const parsed = dayjs.tz(isoMatch[0], 'YYYY-MM-DD', TIMEZONE);
-    if (parsed.isValid() && parsed.format('YYYY-MM-DD') >= now.format('YYYY-MM-DD')) {
-      return parsed;
-    }
+    if (parsed.isValid() && parsed.format('YYYY-MM-DD') >= now.format('YYYY-MM-DD')) return parsed;
   }
 
-  // Safe default: tomorrow (NEVER return invalid)
-  return now.add(1, 'day');
+  return now.add(1, 'day'); // safe default: tomorrow
 }
 
-// Removed formatTime12 since we use it from utils
-
+/** Format a dayjs object as Arabic full date string */
 function formatArabicDay(d) {
-  const days   = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
-  const months = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+  const days   = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+  const months = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو',
+                  'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
   return `${days[d.day()]} ${d.date()} ${months[d.month()]} ${d.year()}`;
 }
 
-const ARABIC_STOP_WORDS = new Set([
-  'هل','ما','هو','هي','في','من','إلى','على','عن','مع','لي','لك','له','لها',
-  'هذا','هذه','ذلك','تلك','التي','الذي','و','أو','لكن','أن','إن','كان',
-  'يكون','قد','لا','ليس','عند','كل','بعض','مثل','هنا','هناك',
-]);
-
-function extractKeywords(text) {
-  return text
-    .replace(/[،,\.!؟?؛]/g, ' ')
-    .split(/\s+/)
-    .map((w) => w.replace(/^[الـ]/, ''))  // strip definite article
-    .filter((w) => w.length >= 3 && !ARABIC_STOP_WORDS.has(w))
-    .slice(0, 5);
-}
+// ── getDynamicScheduleSummary ─────────────────────────────────────────────────
+// Used by systemPrompt.js to embed the 7-day schedule in the system prompt.
+// Ported from old tools.js lines 739-818.
 
 async function getDynamicScheduleSummary(clinicId) {
-  const now = getBaghdadNow();
-  const next7DaysEnd = now.add(7, 'day').endOf('day');
+  const now           = getBaghdadNow();
+  const next7DaysEnd  = now.add(7, 'day').endOf('day');
 
   const [schedulesRes, blocksRes] = await Promise.all([
-    supabase
-      .from('availability_schedules')
-      .select('day_of_week, specific_date, is_working_day, shifts')
-      .eq('clinic_id', clinicId),
-    supabase
-      .from('blocked_periods')
-      .select('start_at, end_at, is_full_day, reason, substitute_doctor_name, substitute_doctor_note')
+    supabase.from('availability_schedules').select('day_of_week, specific_date, is_working_day, shifts').eq('clinic_id', clinicId),
+    supabase.from('blocked_periods').select('start_at, end_at, is_full_day, reason, substitute_doctor_name, substitute_doctor_note')
       .eq('clinic_id', clinicId)
       .lte('start_at', next7DaysEnd.toISOString())
-      .gte('end_at', now.startOf('day').toISOString())
+      .gte('end_at', now.startOf('day').toISOString()),
   ]);
 
   const schedules = schedulesRes.data || [];
-  const blocks = blocksRes.data || [];
-
-  const daysAr = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
-  let lines = [];
-  lines.push("🗓️ *أوقات الدوام للعيادة خلال الأيام القادمة:*\n");
+  const blocks    = blocksRes.data    || [];
+  const daysAr    = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+  const lines     = ['🗓️ *أوقات الدوام للعيادة خلال الأيام القادمة:*\n'];
 
   for (let i = 0; i < 7; i++) {
-    const targetDay = now.add(i, 'day');
-    const dayOfWeek = targetDay.day(); // 0 is Sunday
-    const dateStr = targetDay.format('YYYY-MM-DD');
+    const targetDay  = now.add(i, 'day');
+    const dayOfWeek  = targetDay.day();
+    const dateStr    = targetDay.format('YYYY-MM-DD');
     const displayDate = `${daysAr[dayOfWeek]} (${targetDay.format('DD/MM')})`;
 
-    // Get basic schedule
     let isWorking = false;
-    let shifts = [];
-    
-    // First specific date, then day of week
+    let shifts    = [];
+
     const specificSchedule = schedules.find(s => s.specific_date === dateStr);
     if (specificSchedule) {
       isWorking = specificSchedule.is_working_day;
-      shifts = specificSchedule.shifts || [];
+      shifts    = specificSchedule.shifts || [];
     } else {
       const defaultSchedule = schedules.find(s => s.day_of_week === dayOfWeek && !s.specific_date);
-      if (defaultSchedule) {
-        isWorking = defaultSchedule.is_working_day;
-        shifts = defaultSchedule.shifts || [];
-      }
+      if (defaultSchedule) { isWorking = defaultSchedule.is_working_day; shifts = defaultSchedule.shifts || []; }
     }
 
-    // Format shifts
-    let scheduleText = "";
-    if (!isWorking || shifts.length === 0) {
-      scheduleText = "عطلة / مغلق";
-    } else {
-      scheduleText = shifts.map(sh => {
-        let op = formatTime12(sh.open);
-        let cl = formatTime12(sh.close);
-        // Clean leading zero
-        op = op.replace(/^0/, '');
-        cl = cl.replace(/^0/, '');
+    let scheduleText = (!isWorking || shifts.length === 0) ? 'عطلة / مغلق' :
+      shifts.map(sh => {
+        const op = formatTime12(sh.open).replace(/^0/, '');
+        const cl = formatTime12(sh.close).replace(/^0/, '');
         return `من ${op} لـ ${cl}`;
       }).join(' و ');
-    }
 
     // Check blocks
-    const targetStartISO = targetDay.startOf('day').toISOString();
-    const targetEndISO = targetDay.endOf('day').toISOString();
-    const block = blocks.find(b => b.start_at < targetEndISO && b.end_at > targetStartISO);
+    const block = blocks.find(b => {
+      const s = dayjs(b.start_at).tz(TIMEZONE).format('YYYY-MM-DD');
+      const e = dayjs(b.end_at).tz(TIMEZONE).format('YYYY-MM-DD');
+      return dateStr >= s && dateStr <= e;
+    });
 
     if (block) {
-      if (block.substitute_doctor_name) {
-        scheduleText += ` (⚠️ البديل: ${block.substitute_doctor_name})`;
-      } else {
-        scheduleText = "مغلق (إجازة/غياب)";
-      }
+      scheduleText = block.substitute_doctor_name
+        ? scheduleText + ` (⚠️ البديل: ${block.substitute_doctor_name})`
+        : 'مغلق (إجازة/غياب)';
     }
 
-    let prefix = i === 0 ? "اليوم " : i === 1 ? "غداً " : "";
+    const prefix = i === 0 ? 'اليوم ' : i === 1 ? 'غداً ' : '';
     lines.push(`🔹 *${prefix}${displayDate}:* ${scheduleText}`);
   }
 
   return lines.join('\n\n');
 }
 
+// ── getAbsenceSummary ─────────────────────────────────────────────────────────
+// Used by systemPrompt.js to embed absence info in the system prompt.
+// Ported from old tools.js lines 821-887.
+
 async function getAbsenceSummary(clinicId) {
-  const now = getBaghdadNow();
+  const now          = getBaghdadNow();
   const next7DaysEnd = now.add(7, 'day').endOf('day');
 
   const [blocksRes, schedulesRes] = await Promise.all([
-    supabase
-      .from('blocked_periods')
-      .select('start_at, end_at, is_full_day, reason, substitute_doctor_name')
+    supabase.from('blocked_periods').select('start_at, end_at, is_full_day, reason, substitute_doctor_name')
       .eq('clinic_id', clinicId)
       .lte('start_at', next7DaysEnd.toISOString())
       .gte('end_at', now.startOf('day').toISOString()),
-    supabase
-      .from('availability_schedules')
-      .select('*')
-      .eq('clinic_id', clinicId)
+    supabase.from('availability_schedules').select('*').eq('clinic_id', clinicId),
   ]);
 
-  const blocks = blocksRes.data || [];
+  const blocks    = blocksRes.data    || [];
   const schedules = schedulesRes.data || [];
-
-  const daysAr = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
-  let lines = [];
-  
-  // Track if we found any absence
-  let hasAbsence = false;
+  const daysAr    = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+  const lines     = [];
+  let   hasAbsence = false;
 
   for (let i = 0; i < 7; i++) {
-    const targetDay = now.add(i, 'day');
-    const dayOfWeek = targetDay.day();
-    const targetStartISO = targetDay.startOf('day').toISOString();
-    const targetEndISO = targetDay.endOf('day').toISOString();
-    const displayDate = `${daysAr[dayOfWeek]} (${targetDay.format('DD/MM')})`;
+    const targetDay    = now.add(i, 'day');
+    const dayOfWeek    = targetDay.day();
+    const targetStart  = targetDay.startOf('day').toISOString();
+    const targetEnd    = targetDay.endOf('day').toISOString();
+    const displayDate  = `${daysAr[dayOfWeek]} (${targetDay.format('DD/MM')})`;
 
-    // Check schedule first
-    let isWorking = false;
-    const generalSched = schedules.find(s => s.day_of_week === dayOfWeek && s.specific_date === null);
+    const generalSched  = schedules.find(s => s.day_of_week === dayOfWeek && s.specific_date === null);
     const specificSched = schedules.find(s => s.specific_date === targetDay.format('YYYY-MM-DD'));
-    const activeSched = specificSched || generalSched;
+    const activeSched   = specificSched || generalSched;
+    const isWorking     = !!(activeSched?.is_working_day);
 
-    if (activeSched && activeSched.is_working_day) {
-      isWorking = true;
-    }
+    const block = blocks.find(b => b.start_at < targetEnd && b.end_at > targetStart);
 
-    // Check blocks
-    const block = blocks.find(b => b.start_at < targetEndISO && b.end_at > targetStartISO);
-    
     if (!isWorking && !block) {
       lines.push(`🔹 *${displayDate}:* عطلة العيادة المعتادة (مغلق)`);
       hasAbsence = true;
     } else if (block) {
-      let note = "";
-      if (block.substitute_doctor_name) {
-        note = `الدكتور الأساسي غائب (البديل: *${block.substitute_doctor_name}*)`;
-      } else {
-        note = "العيادة مغلقة (إجازة/غياب الدكتور)";
-      }
+      const note = block.substitute_doctor_name
+        ? `الدكتور الأساسي غائب (البديل: *${block.substitute_doctor_name}*)`
+        : 'العيادة مغلقة (إجازة/غياب الدكتور)';
       lines.push(`🔹 *${displayDate}:* ⚠️ ${note}`);
       hasAbsence = true;
     }
   }
 
-  if (!hasAbsence) {
-    return "لا توجد أي إجازات أو غيابات مجدولة للدكتور خلال الأيام القادمة، الدوام مستمر بشكل طبيعي. 😊";
-  }
-
-  return "⚠️ *أيام إجازات وغياب الدكتور للأيام السبعة القادمة:*\n\n" + lines.join('\n');
+  return hasAbsence
+    ? '⚠️ *أيام إجازات وغياب الدكتور للأيام السبعة القادمة:*\n\n' + lines.join('\n')
+    : 'لا توجد إجازات أو غيابات مجدولة للأيام القادمة. الدوام مستمر بشكل طبيعي. 😊';
 }
 
-module.exports = { 
-  toolDefinitions, 
-  executeTool, 
-  searchFAQ,
+// ── searchFAQ ─────────────────────────────────────────────────────────────────
+// Keyword-based FAQ search. Kept as fallback — main FAQ answers come from system prompt.
+// Ported from old tools.js lines 569-629.
+
+async function searchFAQ(clinicId, message) {
+  try {
+    const { data: faqs } = await supabase
+      .from('faqs').select('question, answer, keywords').eq('clinic_id', clinicId).eq('is_active', true);
+
+    if (!faqs || faqs.length === 0) return { found: false, answer: null };
+
+    const msg    = message.replace(/[؟?!،,.]/g, '').trim();
+    const scored = faqs.map(faq => {
+      let score = 0;
+      for (const kw of (faq.keywords || [])) {
+        if (msg.includes(kw)) score += 3;
+      }
+      const words = msg.split(' ').filter(w => w.length > 2);
+      for (const word of words) {
+        for (const kw of (faq.keywords || [])) {
+          if (kw.includes(word) || word.includes(kw)) score += 1;
+        }
+      }
+      return { ...faq, score };
+    });
+
+    const best = scored.sort((a, b) => b.score - a.score)[0];
+    return best && best.score >= 2 ? { found: true, answer: best.answer } : { found: false, answer: null };
+
+  } catch (err) {
+    logger.error('[Tool] searchFAQ error', { error: err.message });
+    return { found: false, error: err.message };
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXPORTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+module.exports = {
+  toolDefinitions,
+  executeTool,
+  // Helpers used by systemPrompt.js and guardrails.js
   getDayConfig,
+  getBlockForDay,
   parseArabicDatePreference,
   getDynamicScheduleSummary,
-  getAbsenceSummary
+  getAbsenceSummary,
+  searchFAQ,
 };

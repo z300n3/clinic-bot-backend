@@ -1,180 +1,190 @@
-const { extractIntent }     = require('./extract');
-const { validateExtracted } = require('./validate');
-const { decide }            = require('./decide');
-const { execute }           = require('./execute');
-const { saveMessage, loadConversationHistory, supabase, upsertConversationState } = require('../services/supabase');
-const logger = require('../utils/logger');
+'use strict';
+
+/**
+ * agent/index.js — Hybrid Agentic + Guardrails
+ *
+ * Replaces the old Extract → Validate → Decide → Execute pipeline.
+ *
+ * New flow:
+ *   1. Pre-Guardrails    → state-based bypass (doctor_active) / context injection
+ *   2. Build system prompt → clinic info + schedule + FAQs (dynamic, every call)
+ *   3. Load history      → last 15 user/assistant messages
+ *   4. Agentic loop      → LLM decides → tool call → guardrail → execute → LLM refines
+ *   5. Post-Guardrails   → sanitize final reply
+ *   6. Welcome message   → first-ever reply gets a greeting prefix
+ *   7. Save & return     → persist to conversations table
+ *
+ * External signature is IDENTICAL to old index.js — webhooks/whatsapp.js unchanged.
+ */
+
+const { chatWithTools }        = require('../services/ai');
+const {
+  saveMessage,
+  loadConversationHistory,
+  supabase,
+}                              = require('../services/supabase');
+const { preGuardrails, validateToolCall, postGuardrails } = require('./guardrails');
+const { buildSystemPrompt }    = require('./systemPrompt');
+const { toolDefinitions, executeTool } = require('./tools');
+const logger                   = require('../utils/logger');
+
+const MAX_TOOL_ROUNDS = 5;   // Guardrail: prevents infinite agentic loops
+
+// ── Main entry point ──────────────────────────────────────────────────────────
 
 async function handleIncomingMessage({ clinic, patient, patientPhone, userMessage, messageType }) {
 
-  // 1. Load state
-  const { data: stateRow, error: stateErr } = await supabase
-    .from('conversation_state')
-    .select('state, state_data, last_message_at')
-    .eq('clinic_id', clinic.id)
-    .eq('patient_phone', patientPhone)
-    .maybeSingle();
+  // ═══ PHASE 1: Pre-Guardrails ═══════════════════════════════════════════════
+  const preCheck = await preGuardrails(clinic, patientPhone);
 
-  logger.info('[STATE READ]', {
-    clinicId: clinic.id,
-    patientPhone: patientPhone,
-    currentState: stateRow?.state || 'NONE',
-    gateStep: stateRow?.state_data?.escalation?.gate_step || null,
-    readError: stateErr?.message || null
+  if (preCheck.bypass) {
+    // doctor_active: respond immediately without calling the LLM
+    await saveMessage({
+      clinicId:    clinic.id,
+      patientId:   patient.id,
+      patientPhone,
+      role:        'assistant',
+      content:     preCheck.reply,
+    });
+    return preCheck.reply;
+  }
+
+  // ═══ PHASE 2: Build system prompt + load history ════════════════════════════
+  const [systemPrompt, history] = await Promise.all([
+    buildSystemPrompt(clinic, preCheck.stateContext),
+    loadConversationHistory(clinic.id, patientPhone, 15),
+  ]);
+
+  // ═══ PHASE 3: Assemble messages ═════════════════════════════════════════════
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    // Historical user/assistant turns
+    ...history.map(m => ({ role: m.role, content: m.content })),
+    // Current user message
+    { role: 'user', content: userMessage },
+  ];
+
+  // Inject voice annotation so LLM knows to confirm before booking
+  if (messageType === 'voice') {
+    messages.push({
+      role:    'system',
+      content: 'ملاحظة: الرسالة السابقة جاءت من تحويل صوتي إلى نص وقد تحتوي على أخطاء. إذا تضمنت اسماً أو تاريخاً للحجز، أكد المعلومات مع المريض قبل استدعاء book_appointment.',
+    });
+  }
+
+  // ═══ PHASE 4: Agentic Loop ══════════════════════════════════════════════════
+  let response;
+  try {
+    response = await chatWithTools(messages, toolDefinitions);
+  } catch (err) {
+    logger.error('[Agent] Initial LLM call failed', { error: err.message });
+    const fallback = 'عذراً، صار خطأ تقني مؤقت. حاول مرة ثانية بعد شوي. 🙏';
+    await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: fallback });
+    return fallback;
+  }
+
+  let rounds = 0;
+
+  while (rounds < MAX_TOOL_ROUNDS) {
+    const choice  = response.choices[0];
+    const message = choice.message;
+
+    // No tool calls → LLM is done, exit loop
+    if (!message.tool_calls || message.tool_calls.length === 0) {
+      break;
+    }
+
+    // Append the assistant's tool-requesting message to the conversation
+    messages.push(message);
+
+    // Execute each requested tool call
+    for (const toolCall of message.tool_calls) {
+      const fnName = toolCall.function.name;
+      let   fnArgs;
+
+      try {
+        fnArgs = JSON.parse(toolCall.function.arguments);
+      } catch (_) {
+        fnArgs = {};
+      }
+
+      logger.info('[Agent] Tool requested', { tool: fnName, args: fnArgs, round: rounds + 1 });
+
+      // ── Tool-Level Guardrail ──
+      const guard = validateToolCall(fnName, fnArgs, { clinic, patient, patientPhone });
+
+      let toolResult;
+      if (guard.blocked) {
+        // Return the guardrail error to the LLM so it can self-correct
+        toolResult = { error: guard.reason };
+      } else {
+        // Execute the tool
+        toolResult = await executeTool(fnName, fnArgs, { clinic, patient, patientPhone });
+      }
+
+      logger.info('[Agent] Tool result', { tool: fnName, success: !toolResult.error, round: rounds + 1 });
+
+      // Append tool result to messages
+      messages.push({
+        role:         'tool',
+        tool_call_id: toolCall.id,
+        content:      JSON.stringify(toolResult),
+      });
+    }
+
+    // Re-invoke LLM with tool results
+    try {
+      response = await chatWithTools(messages, toolDefinitions);
+    } catch (err) {
+      logger.error('[Agent] LLM call failed during tool loop', { round: rounds + 1, error: err.message });
+      break;
+    }
+
+    rounds++;
+  }
+
+  if (rounds >= MAX_TOOL_ROUNDS) {
+    logger.warn('[Agent] Max tool rounds reached', { patientPhone, rounds });
+  }
+
+  // ═══ PHASE 5: Extract final reply ═══════════════════════════════════════════
+  const rawReply = response?.choices?.[0]?.message?.content || '';
+
+  // ═══ PHASE 6: Post-Guardrails ═══════════════════════════════════════════════
+  let finalReply = postGuardrails(rawReply);
+
+  if (!finalReply.trim()) {
+    finalReply = 'عذراً، ما كدرت أعالج طلبك. حاول مرة ثانية أو تواصل مع العيادة مباشرة. 🙏';
+  }
+
+  // ═══ PHASE 7: Welcome message for first-ever reply ══════════════════════════
+  try {
+    const { count } = await supabase
+      .from('conversations')
+      .select('*', { count: 'exact', head: true })
+      .eq('patient_id', patient.id)
+      .eq('role', 'assistant');
+
+    if (count === 0) {
+      const welcome =
+        `أهلاً بك! أنا المساعد الذكي لعيادة د. ${clinic.doctor_name || clinic.name} 🤖\n` +
+        `أقدر أساعدك في حجز، إلغاء، أو تأجيل موعدك.\n\n---\n\n`;
+      finalReply = welcome + finalReply;
+    }
+  } catch (_) {
+    // Non-critical — skip welcome if count query fails
+  }
+
+  // ═══ PHASE 8: Persist & return ══════════════════════════════════════════════
+  await saveMessage({
+    clinicId:    clinic.id,
+    patientId:   patient.id,
+    patientPhone,
+    role:        'assistant',
+    content:     finalReply,
   });
 
-  const currentState = stateRow?.state      || 'active';
-  const stateData    = stateRow?.state_data || {};
-  const subState     = stateData.booking_substate || 'idle';
-
-  // 2. Handle doctor_active (bypass pipeline)
-  if (currentState === 'doctor_active') {
-    const reply = 'الطبيب يراجع حالتك حالياً. الرد قريب 🙏';
-    await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
-    return reply;
-  }
-
-  // 3. Run Extract FIRST (works for all states now)
-  const extracted = await extractIntent(userMessage, subState, stateData);
-  extracted.userMessage = userMessage; // pass raw message for gate answers
-  extracted.messageType = messageType; // pass messageType to decide
-  logger.info('[Pipeline] Extracted', { 
-    intent: extracted.intent,
-    msgPreview: userMessage.slice(0, 30),
-    stateAtExtract: currentState
-  });
-
-  // 4. GATE handling — intent-aware
-  if (currentState === 'gate_collecting') {
-    // 4a. Explicit cancel/exit keywords
-    if (/الغاء|إلغاء|خروج|رجوع|بطلت|ما اريد|لا اريد/i.test(userMessage)) {
-      await upsertConversationState(clinic.id, patientPhone, 'active', {});
-      const reply = 'تم إلغاء الطلب والتراجع. كيف أقدر أساعدك الآن؟ 😊';
-      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
-      return reply;
-    }
-
-    // 4b. Strong NEW intent → leave gate and process new request
-    const strongIntents = ['booking', 'cancellation', 'cancel_all', 'check_appointment', 'reschedule'];
-    if (strongIntents.includes(extracted.intent)) {
-      await upsertConversationState(clinic.id, patientPhone, 'active', {});
-      const checks = await validateExtracted(extracted, clinic, patient, {}, userMessage);
-      const decision = decide(extracted, checks, 'idle', {});
-      const reply = await execute(decision, clinic, patient, patientPhone);
-      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
-      return reply;
-    }
-
-    // 4c. Otherwise → treat as a gate answer (continue gate)
-    const decision = { 
-      action: 'GATE_CONTINUE', 
-      step: stateData.escalation?.gate_step || 1, 
-      userMessage 
-    };
-    const reply = await execute(decision, clinic, patient, patientPhone);
-    await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
-    return reply;
-  }
-
-  // 5. doctor_pending handling (unchanged hybrid logic)
-  if (currentState === 'doctor_pending') {
-    if (['booking', 'inquiry', 'check_appointment', 'greeting', 'cancellation', 'cancel_all', 'reschedule'].includes(extracted.intent)) {
-      const checks = await validateExtracted(extracted, clinic, patient, stateData, userMessage);
-      const decision = decide(extracted, checks, subState, stateData);
-      const reply = await execute(decision, clinic, patient, patientPhone);
-      
-      await upsertConversationState(clinic.id, patientPhone, 'doctor_pending', stateData);
-      await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
-      return reply;
-    }
-
-    const reply = 'طلبك بانتظار مراجعة الطبيب. سيتم الرد قريباً 🙏\nإذا تحتاج حجز أو استفسار، تكدر تسأل عادي.';
-    await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
-    return reply;
-  }
-
-  // 6. SUBSTATE ESCAPE — stale confirmation substate blocked by new intent
-  const confirmSubstates = ['awaiting_cancel_confirm','awaiting_cancel_all_confirm',
-                            'awaiting_rebook_confirm','awaiting_cancel_select', 'awaiting_voice_confirm',
-                            'awaiting_reschedule_confirm', 'awaiting_reschedule_select', 'awaiting_name_confirm'];
-  const bookingSubstates = ['awaiting_info', 'awaiting_date', 'awaiting_reschedule_date'];
-  const escapeIntents = ['booking','escalate_to_doctor','cancellation','cancel_all','inquiry','check_appointment','reschedule'];
-
-  // 6a. For booking substates: merge partial data
-  if (bookingSubstates.includes(subState) && (extracted.intent === 'booking' || extracted.intent === 'reschedule')) {
-    const partial = stateData.partial_booking || {};
-    if (!extracted.patient_name && partial.patient_name) {
-      extracted.patient_name = partial.patient_name;
-    }
-    if (!extracted.date_preference && partial.date_preference) {
-      extracted.date_preference = partial.date_preference;
-    }
-    // Keep substate so pipeline continues normally
-  }
-
-  // 6b. Special handling for awaiting_name_confirm
-  if (subState === 'awaiting_name_confirm') {
-    if (extracted.intent === 'confirmation') {
-      extracted.intent = 'booking';
-      extracted.patient_name = stateData.recentName;
-      extracted.date_preference = extracted.date_preference || stateData.datePref;
-    } else if (extracted.intent === 'rejection') {
-      extracted.intent = 'booking';
-      extracted.patient_name = null;
-      extracted.date_preference = extracted.date_preference || stateData.datePref;
-      stateData.ignoreRecentName = true;
-    }
-  }
-
-  // 6c. For confirmation substates: escape if new strong intent
-  if (confirmSubstates.includes(subState) &&
-      extracted.intent !== 'confirmation' &&
-      extracted.intent !== 'rejection' &&
-      escapeIntents.includes(extracted.intent)) {
-    await upsertConversationState(clinic.id, patientPhone, 'active', {});
-    stateData.booking_substate = 'idle';
-  }
-
-  // 7. SUBSTATE EXPIRY — any substate older than 10 minutes auto-resets
-  if (subState && subState !== 'idle' && stateRow?.last_message_at) {
-    const minutesSince = (Date.now() - new Date(stateRow.last_message_at).getTime()) / 60000;
-    if (minutesSince > 10) {
-      await upsertConversationState(clinic.id, patientPhone, 'active', {});
-      stateData.booking_substate = 'idle';
-    }
-  }
-
-  // 8. escalate_to_doctor intent (NOT in gate) → start gate
-  if (extracted.intent === 'escalate_to_doctor') {
-    const decision = { action: 'GATE_START' };
-    const reply = await execute(decision, clinic, patient, patientPhone);
-    await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: reply });
-    return reply;
-  }
-
-  // 9. Normal pipeline: Validate → Decide → Execute
-  const recomputedSubState = stateData.booking_substate || 'idle';
-  const checks = await validateExtracted(extracted, clinic, patient, stateData, userMessage);
-  logger.info('[Pipeline] Validated', { nameValid: checks.nameValid, dayAvail: checks.dayInfo?.isWorking });
-
-  const decision = decide(extracted, checks, recomputedSubState, stateData);
-  logger.info('[Pipeline] Decision', { action: decision.action });
-
-  const reply = await execute(decision, clinic, patient, patientPhone);
-
-  const { count } = await supabase.from('messages')
-    .select('*', { count: 'exact', head: true })
-    .eq('patient_id', patient.id)
-    .eq('role', 'assistant');
-
-  let finalReply = reply;
-  if (count === 0) {
-    const welcome = `أهلاً بك! أنا المساعد الذكي لعيادة د. ${clinic.doctor_name || clinic.name} 🤖\nأقدر أساعدك في حجز، إلغاء، أو تأجيل موعدك. للاستشارات الطبية أو الأسئلة المعقدة، سيقوم الطبيب أو السكرتير بالرد عليك لاحقاً.\n\n---\n\n`;
-    finalReply = welcome + reply;
-  }
-
-  await saveMessage({ clinicId: clinic.id, patientId: patient.id, patientPhone, role: 'assistant', content: finalReply });
-
+  logger.info('[Agent] Reply sent', { patientPhone, length: finalReply.length, toolRounds: rounds });
   return finalReply;
 }
 
