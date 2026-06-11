@@ -148,11 +148,34 @@ router.post('/web', async (req, res) => {
 
       if (within24h) {
         const slotDate = dayjs(scheduled_at).tz(TIMEZONE);
+        const dayOfWeek = slotDate.day();
         const days = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
-        const dayName = days[slotDate.day()];
-        const timeStr = slotDate.format('hh:mm A').replace('AM', 'ص').replace('PM', 'م');
+        const dayName = days[dayOfWeek];
+        const dateStr = slotDate.format('YYYY-MM-DD');
         
-        const message = `مرحباً ${patient_name} 👋\n\nتم تأكيد حجز موعدك بنجاح في ${clinic.name}.\n\n📅 اليوم: ${dayName}\n⏰ الوقت: ${timeStr}\n\nنتمى لك السلامة الشفاء العاجل!`;
+        // Fetch the schedule for this day from DB
+        const { data: sched } = await supabase
+          .from('availability_schedules')
+          .select('is_working_day, shifts')
+          .eq('clinic_id', clinic_id)
+          .eq('day_of_week', dayOfWeek)
+          .maybeSingle();
+
+        let timeStr = 'حسب دورك';
+        if (sched && sched.is_working_day && sched.shifts && sched.shifts.length > 0) {
+          const formatTime12Hour = (time24) => {
+            if (!time24) return '';
+            const [hours, minutes] = time24.split(':');
+            let h = parseInt(hours, 10);
+            const ampm = h >= 12 ? 'م' : 'ص';
+            h = h % 12 || 12;
+            return `${String(h).padStart(2, '0')}:${minutes} ${ampm}`;
+          };
+          const shift = sched.shifts[0];
+          timeStr = `${formatTime12Hour(shift.open)} - ${formatTime12Hour(shift.close)}`;
+        }
+        
+        const message = `مرحباً ${patient_name} 👋\n\nتم تأكيد حجز موعدك بنجاح في ${clinic.name}.\n\n📅 التاريخ: ${dateStr} (${dayName})\n⏰ أوقات الدوام: ${timeStr}\n🔢 الدور المتوقع: ${queueNumber}\n\nنتمنى لك السلامة والشفاء العاجل!`;
         
         await sendWhatsAppMessage(clinic.whatsapp_phone_number_id, phone_number, message);
         whatsappSent = true;
