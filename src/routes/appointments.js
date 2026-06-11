@@ -55,9 +55,9 @@ router.post('/web', async (req, res) => {
     return res.status(400).json({ error: 'جميع الحقول المطلوبة يجب تعبئتها' });
   }
 
-  // Format phone number: 07729243035 -> +9647729243035
+  // Format phone number: 07729243035 -> 9647729243035
   if (phone_number.startsWith('07') && phone_number.length === 11) {
-    phone_number = '+964' + phone_number.substring(1);
+    phone_number = '964' + phone_number.substring(1);
   }
 
   try {
