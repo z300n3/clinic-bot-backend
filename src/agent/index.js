@@ -26,6 +26,7 @@ const {
 const { preGuardrails, validateToolCall, postGuardrails } = require('./guardrails');
 const { buildSystemPrompt }    = require('./systemPrompt');
 const { toolDefinitions, executeTool } = require('./tools');
+const { trackAgenticUsage }    = require('../utils/tokenTracker');
 const logger                   = require('../utils/logger');
 
 const MAX_TOOL_ROUNDS = 5;   // Guardrail: prevents infinite agentic loops
@@ -73,9 +74,17 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
   }
 
   // ═══ PHASE 4: Agentic Loop ══════════════════════════════════════════════════
+  // ── Token accumulators (sum across all LLM calls in this turn) ────────────
+  let totalInputTokens  = 0;
+  let totalOutputTokens = 0;
+  const toolsCalled     = [];
+
   let response;
   try {
     response = await chatWithTools(messages, toolDefinitions);
+    // Accumulate tokens from initial call
+    totalInputTokens  += response?.usage?.prompt_tokens     || 0;
+    totalOutputTokens += response?.usage?.completion_tokens || 0;
   } catch (err) {
     logger.error('[Agent] Initial LLM call failed', { error: err.message });
     const fallback = 'عذراً، صار خطأ تقني مؤقت. حاول مرة ثانية بعد شوي. 🙏';
@@ -109,6 +118,7 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
       }
 
       logger.info('[Agent] Tool requested', { tool: fnName, args: fnArgs, round: rounds + 1 });
+      if (!toolsCalled.includes(fnName)) toolsCalled.push(fnName);
 
       // ── Tool-Level Guardrail ──
       const guard = validateToolCall(fnName, fnArgs, { clinic, patient, patientPhone });
@@ -135,6 +145,9 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
     // Re-invoke LLM with tool results
     try {
       response = await chatWithTools(messages, toolDefinitions);
+      // Accumulate tokens from this tool-round call
+      totalInputTokens  += response?.usage?.prompt_tokens     || 0;
+      totalOutputTokens += response?.usage?.completion_tokens || 0;
     } catch (err) {
       logger.error('[Agent] LLM call failed during tool loop', { round: rounds + 1, error: err.message });
       break;
@@ -148,7 +161,8 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
   }
 
   // ═══ PHASE 5: Extract final reply ═══════════════════════════════════════════
-  const rawReply = response?.choices?.[0]?.message?.content || '';
+  const finishReason = response?.choices?.[0]?.finish_reason || 'unknown';
+  const rawReply     = response?.choices?.[0]?.message?.content || '';
 
   // ═══ PHASE 6: Post-Guardrails ═══════════════════════════════════════════════
   let finalReply = postGuardrails(rawReply);
@@ -184,7 +198,26 @@ async function handleIncomingMessage({ clinic, patient, patientPhone, userMessag
     content:     finalReply,
   });
 
-  logger.info('[Agent] Reply sent', { patientPhone, length: finalReply.length, toolRounds: rounds });
+  // ═══ PHASE 9: Token tracking ════════════════════════════════════════════════
+  trackAgenticUsage({
+    patientPhone,
+    messagePreview: userMessage,
+    totalInput:     totalInputTokens,
+    totalOutput:    totalOutputTokens,
+    toolRounds:     rounds,
+    toolsCalled,
+    success:        !!rawReply,
+    finishReason,
+  });
+
+  logger.info('[Agent] Reply sent', {
+    patientPhone,
+    length:      finalReply.length,
+    toolRounds:  rounds,
+    input_tokens:  totalInputTokens,
+    output_tokens: totalOutputTokens,
+    total_tokens:  totalInputTokens + totalOutputTokens,
+  });
   return finalReply;
 }
 
