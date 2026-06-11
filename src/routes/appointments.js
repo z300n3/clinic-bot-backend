@@ -12,16 +12,52 @@ const logger                  = require('../utils/logger');
 
 const TIMEZONE = 'Asia/Baghdad';
 
+// ── GET /api/appointments/queue-estimate ─────────────────────────────────────
+// Query: ?clinic_id=...&date=YYYY-MM-DD
+// Returns the expected queue number for the given date.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/queue-estimate', async (req, res) => {
+  try {
+    const { clinic_id, date } = req.query;
+    if (!clinic_id || !date) {
+      return res.status(400).json({ error: 'clinic_id and date are required' });
+    }
+
+    const startOfDay = dayjs.tz(date, TIMEZONE).startOf('day').toISOString();
+    const endOfDay = dayjs.tz(date, TIMEZONE).endOf('day').toISOString();
+
+    const { count, error } = await supabase
+      .from('appointments')
+      .select('id', { count: 'exact', head: true })
+      .eq('clinic_id', clinic_id)
+      .gte('scheduled_at', startOfDay)
+      .lte('scheduled_at', endOfDay)
+      .not('status', 'in', '("cancelled","cancelled_by_clinic")');
+
+    if (error) throw error;
+
+    return res.json({ expected_queue: count + 1 });
+  } catch (err) {
+    logger.error('Error fetching queue estimate', { error: err.message });
+    return res.status(500).json({ error: 'Failed to fetch queue estimate' });
+  }
+});
+
 // ── POST /api/appointments/web ──────────────────────────────────────────────
 //
 // Body: { clinic_id, patient_name, phone_number, scheduled_at }
 // Creates a new appointment from the web landing page.
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/web', async (req, res) => {
-  const { clinic_id, patient_name, phone_number, scheduled_at } = req.body;
+  let { clinic_id, patient_name, phone_number, scheduled_at } = req.body;
 
   if (!clinic_id || !patient_name || !phone_number || !scheduled_at) {
     return res.status(400).json({ error: 'جميع الحقول المطلوبة يجب تعبئتها' });
+  }
+
+  // Format phone number: 07729243035 -> +9647729243035
+  if (phone_number.startsWith('07') && phone_number.length === 11) {
+    phone_number = '+964' + phone_number.substring(1);
   }
 
   try {
@@ -64,7 +100,20 @@ router.post('/web', async (req, res) => {
       patientId = newPatient.id;
     }
 
-    // 3. Create appointment
+    // 3. Calculate queue number for the day
+    const startOfDay = dayjs(scheduled_at).tz(TIMEZONE).startOf('day').toISOString();
+    const endOfDay = dayjs(scheduled_at).tz(TIMEZONE).endOf('day').toISOString();
+    const { count: currentQueue } = await supabase
+      .from('appointments')
+      .select('id', { count: 'exact', head: true })
+      .eq('clinic_id', clinic_id)
+      .gte('scheduled_at', startOfDay)
+      .lte('scheduled_at', endOfDay)
+      .not('status', 'in', '("cancelled","cancelled_by_clinic")');
+
+    const queueNumber = (currentQueue || 0) + 1;
+
+    // 4. Create appointment
     const { data: newAppt, error: apptErr } = await supabase
       .from('appointments')
       .insert({
@@ -73,28 +122,49 @@ router.post('/web', async (req, res) => {
         patient_name,
         scheduled_at,
         duration_minutes: clinic.appointment_duration_minutes,
-        status: 'scheduled'
+        status: 'scheduled',
+        queue_number: queueNumber
       })
       .select('id, queue_number')
       .single();
 
     if (apptErr) throw apptErr;
 
-    // 4. Send Confirmation WhatsApp (Best effort)
+    // 5. Send Confirmation WhatsApp (Best effort) - Meta 24h Window Check
+    let whatsappSent = false;
     try {
-      const slotDate = dayjs(scheduled_at).tz(TIMEZONE);
-      const days = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
-      const dayName = days[slotDate.day()];
-      const timeStr = slotDate.format('hh:mm A').replace('AM', 'ص').replace('PM', 'م');
-      
-      const message = `مرحباً ${patient_name} 👋\n\nتم تأكيد حجز موعدك بنجاح في ${clinic.name}.\n\n📅 اليوم: ${dayName}\n⏰ الوقت: ${timeStr}\n\nنتمى لك السلامة الشفاء العاجل!`;
-      
-      await sendWhatsAppMessage(clinic.whatsapp_phone_number_id, phone_number, message);
+      const { data: convState } = await supabase
+        .from('conversation_state')
+        .select('last_message_at')
+        .eq('clinic_id', clinic_id)
+        .eq('patient_phone', phone_number)
+        .maybeSingle();
+
+      let within24h = false;
+      if (convState && convState.last_message_at) {
+        const hoursSinceLastMessage = dayjs().diff(dayjs(convState.last_message_at), 'hour');
+        if (hoursSinceLastMessage < 24) within24h = true;
+      }
+
+      if (within24h) {
+        const slotDate = dayjs(scheduled_at).tz(TIMEZONE);
+        const days = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+        const dayName = days[slotDate.day()];
+        const timeStr = slotDate.format('hh:mm A').replace('AM', 'ص').replace('PM', 'م');
+        
+        const message = `مرحباً ${patient_name} 👋\n\nتم تأكيد حجز موعدك بنجاح في ${clinic.name}.\n\n📅 اليوم: ${dayName}\n⏰ الوقت: ${timeStr}\n\nنتمى لك السلامة الشفاء العاجل!`;
+        
+        await sendWhatsAppMessage(clinic.whatsapp_phone_number_id, phone_number, message);
+        whatsappSent = true;
+      } else {
+        logger.info('Skipped WhatsApp confirmation due to Meta 24h window limit', { phone_number });
+      }
     } catch (waErr) {
       logger.error('WhatsApp confirmation failed', { error: waErr.message });
     }
 
-    return res.status(201).json({ success: true, appointment: newAppt });
+    // Send back whatsappSent so frontend knows whether to show a warning
+    return res.status(201).json({ success: true, appointment: newAppt, whatsappSent });
   } catch (error) {
     logger.error('Error creating web appointment', { error: error.message });
     return res.status(500).json({ error: 'حدث خطأ أثناء تسجيل الموعد' });
