@@ -14,7 +14,7 @@ router.get('/:slug', async (req, res) => {
       .from('clinics')
       .select(`
         id, name, doctor_name, specialty, address, working_hours, 
-        appointment_duration_minutes, consultation_price, treated_diseases, map_link
+        appointment_duration_minutes, consultation_price, treated_diseases, map_link, phone_number
       `)
       .eq('slug', slug)
       .single();
